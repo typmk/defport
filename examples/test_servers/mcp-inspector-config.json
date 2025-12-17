@@ -1,0 +1,31 @@
+{
+  "$schema": "https://modelcontextprotocol.io/inspector/config.schema.json",
+  "servers": {
+    "defport-jvm-http": {
+      "command": "clojure",
+      "args": ["-M:examples", "-m", "mcp-test-server-jvm", "--http", "--port", "3000"],
+      "cwd": "../..",
+      "description": "defport JVM MCP server (HTTP transport)",
+      "url": "http://localhost:3000"
+    },
+    "defport-jvm-stdio": {
+      "command": "clojure",
+      "args": ["-M:examples", "-m", "mcp-test-server-jvm"],
+      "cwd": "../..",
+      "description": "defport JVM MCP server (stdio transport)"
+    },
+    "defport-node-http": {
+      "command": "node",
+      "args": ["target/mcp_test_server_node.js", "--http", "--port", "3001"],
+      "cwd": ".",
+      "description": "defport Node.js MCP server (HTTP transport)",
+      "url": "http://localhost:3001"
+    },
+    "defport-node-stdio": {
+      "command": "node",
+      "args": ["target/mcp_test_server_node.js"],
+      "cwd": ".",
+      "description": "defport Node.js MCP server (stdio transport)"
+    }
+  }
+}

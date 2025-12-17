@@ -2,422 +2,265 @@
 
 **Platform-agnostic, protocol-agnostic library for building protocol servers.**
 
-Defport is a pure Clojure/ClojureScript library that provides the building blocks for protocol servers (MCP, LSP, DAP, GraphQL, gRPC, custom). You provide the business logic and configuration, defport provides the infrastructure.
+Build MCP, LSP, DAP, and custom protocol servers with a clean, data-driven approach.
 
 ## Status
 
-🚧 **In Active Development** - Extracted from production [Defnet](https://github.com/yourorg/defnet) codebase
+**Version:** 0.5.0-SNAPSHOT | **Tests:** 141 tests, 1,027 assertions, 0 failures
 
-**Phase 1 Complete:**
-- ✅ Core protocols defined (Port, Transport, ProtocolAdapter, PortRegistry)
-- ✅ Utility infrastructure (protocol validation, pagination, progress)
-- ✅ Registry system (EDN, Function, Hybrid)
-- ✅ Transport implementations (stdio, HTTP)
-- ✅ Simple EDN loading utilities
-- 🚧 MCP protocol adapter (next)
+| Phase | Status | Highlights |
+|-------|--------|------------|
+| Phase 1: Core Infrastructure | ✅ Complete | Ports, Transports, Registries |
+| Phase 2: MCP Protocol | ✅ Complete | 100% MCP 2025-06-18 spec compliance |
+| Phase 3: Advanced Features | ✅ Complete | Malli, Builder API, Elicitation, Completions |
+| Phase 4: Optional Features | ✅ Complete | ImageContent, Roots, Sampling |
+| Phase 5: Performance | ✅ Complete | 5-10x speedup with concurrent batch processing |
+| Phase 6: Integration | ✅ Complete | Integration patterns, tap> observability, datafy/nav |
+| Phase 7: Multi-Protocol | 🔮 Planned | LSP client/proxy, DAP client/proxy |
 
-## Philosophy: Library, Not Framework
+---
 
-**Defport is a library, not a framework.** This means:
-
-- **You control configuration** - Defport doesn't impose config file locations or search paths
-- **You control application structure** - Defport provides tools, you build the app
-- **No magic** - Everything is explicit, debuggable functions
-- **Composable** - Use only what you need
-
-**Defport provides:**
-- Protocols (abstract interfaces)
-- Implementations (transports, registries)
-- Utilities (validation, pagination, progress)
-
-**Your app provides:**
-- EDN configuration files (wherever you want them)
-- Business logic (port handlers)
-- Configuration management (if needed)
-
-## Quick Start
-
-### 1. Add Dependency
+## Quick Start (8 lines)
 
 ```clojure
-;; deps.edn
-{:deps {defport/defport {:mvn/version "0.1.0-SNAPSHOT"}}}
+(ns my-server
+  (:require [defport :as mcp]))
+
+(mcp/deftool greet
+  "Greet a user"
+  [name :- :string]
+  {:greeting (str "Hello, " name "!")})
+
+(mcp/start! {:name "my-server" :version "1.0.0"})
 ```
 
-### 2. Define Your Ports (Tools/Capabilities)
+**That's it.** One require, define your tools, run.
 
-```edn
-;; resources/my-app/tools.edn
-{:ports
- {:search-code
-  {:id :search-code
-   :description "Search for code"
-   :input-schema {:type "object"
-                  :properties {:query {:type "string"}}}
-   :output-schema {:type "array"}
-   :handler my.app/search-handler
-   :metadata {:token-budget 1000}}}}
-```
+---
 
-### 3. Implement Handlers
+## Philosophy: Low-Level Library
+
+**Defport is a library, not a framework.** Like Ring for HTTP or Lacinia for GraphQL.
+
+| We Provide | We Do NOT Provide |
+|------------|-------------------|
+| Protocol adapters (MCP, LSP*, DAP*) | Auth middleware |
+| Transport layer (stdio, HTTP) | Metrics collectors |
+| Port registry system | HTTP middleware stacks |
+| Observability hooks (tap>, datafy/nav) | Component/Integrant adapters |
+
+**Why?** You already have auth, metrics, and lifecycle management. Defport integrates with YOUR infrastructure.
 
 ```clojure
-(ns my.app
-  (:require [defport.registry.core :as registry]
-            [defport.transports.http :as http]
-            [defport.core :as defport]))
+;; defport provides the MCP handler
+(def mcp-handler (mcp/create-mcp-handler registry adapter))
 
-(defn search-handler [context]
-  (let [query (get-in context [:params :query])]
-    {:result (do-search query)}))
+;; YOU wrap it with YOUR middleware
+(def app
+  (-> mcp-handler
+      (wrap-authentication your-auth-backend)  ; YOUR auth
+      (wrap-metrics your-prometheus-registry)  ; YOUR metrics
+      wrap-json))
 ```
 
-### 4. Create and Start Server
+See [docs/INTEGRATION.md](docs/INTEGRATION.md) for Component, Integrant, Ring, and Pedestal patterns.
 
-```clojure
-(ns my.server
-  (:require [defport.registry.core :as registry]
-            [defport.transports.http :as http]))
-
-;; Create port registry from your EDN
-(def ports (registry/create-edn-registry "resources/my-app/tools.edn"))
-
-;; Create HTTP transport
-(def transport (http/create-http-transport {:port 9876}))
-
-;; Start server (simplified - full implementation in examples/)
-(defport/transport-start transport
-  (fn [request]
-    ;; Your request handling logic here
-    ))
-```
+---
 
 ## Core Concepts
 
-### 1. Port (Capability/Tool/Operation)
+### 1. Port (Capability)
 
-A **Port** represents something your server can do. It's protocol-agnostic - the same port can be exposed via MCP, LSP, or any other protocol.
+A **Port** represents something your server can do. Protocol-agnostic - same port works via MCP, LSP, or any protocol.
 
 ```clojure
-(defprotocol Port
-  (port-id [this])           ; :search-code
-  (port-schema [this])       ; {:input-schema ... :output-schema ...}
-  (port-execute [this ctx])) ; Execute the operation
+{:id :search-code
+ :description "Search for code"
+ :input-schema {:type "object" :properties {:query {:type "string"}}}
+ :handler (fn [{:keys [params]}] {:result (search (:query params))})}
 ```
 
 ### 2. Transport (Message Delivery)
 
-A **Transport** handles low-level message delivery (stdio, HTTP, WebSocket).
+**Transports** handle low-level communication: `stdio` for CLI tools, `http` for web services.
+
+### 3. ProtocolAdapter (Protocol Translation)
+
+**Adapters** translate protocol messages (MCP, LSP, DAP) to port executions.
+
+### 4. PortRegistry (Port Management)
+
+**Registries** manage your ports. Load from EDN files, register programmatically, or both.
+
+---
+
+## Installation
 
 ```clojure
-(defprotocol Transport
-  (transport-start [this handler])  ; Start listening
-  (transport-stop [this])           ; Stop
-  (transport-send [this message]))  ; Send message
+;; deps.edn
+{:deps {io.github.yourorg/defport {:git/tag "v0.5.0" :git/sha "..."}}}
 ```
 
-**Implementations:**
-- `defport.transports.stdio` - stdin/stdout (MCP, LSP, DAP)
-- `defport.transports.http` - HTTP server (MCP HTTP mode)
+---
 
-### 3. PortRegistry (Port Management)
+## Documentation
 
-A **PortRegistry** manages your ports.
+| Document | Description |
+|----------|-------------|
+| [INTEGRATION.md](docs/INTEGRATION.md) | Component, Integrant, Ring, auth, metrics patterns |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rationale and philosophy |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Batch processing and optimization |
+| [CONCURRENCY.md](docs/CONCURRENCY.md) | Thread safety model |
+| [PROJECT_HISTORY.md](docs/PROJECT_HISTORY.md) | Evolution and design decisions |
+| [ROADMAP.md](ROADMAP.md) | Feature roadmap |
+| [CHANGELOG.md](CHANGELOG.md) | Version history |
+
+---
+
+## Examples
+
+### Progressive Disclosure DSL (Recommended)
 
 ```clojure
-(defprotocol PortRegistry
-  (list-ports [this])              ; Get all ports
-  (get-port [this port-id])        ; Get specific port
-  (register-port! [this port-def])) ; Add/update port
+(ns my-server
+  (:require [defport :as mcp]))
+
+;; Simple tool
+(mcp/deftool search-code
+  "Search for code matching a query"
+  [query :- :string]
+  [{:file "src/example.clj" :line 42 :code "(defn example [] ...)"}])
+
+;; Tool with Malli schema
+(mcp/deftool create-user
+  "Create a new user"
+  [:map
+   [:name [:string {:min 1 :max 100}]]
+   [:email [:re #".+@.+\..+"]]
+   [:age {:optional true} [:int {:min 0 :max 150}]]]
+  (create-user-in-db params))
+
+;; Prompt
+(mcp/defprompt explain-function
+  "Generate explanation prompt"
+  [function-name :- :string]
+  [{:role "user" :content {:type "text" :text (str "Explain: " function-name)}}])
+
+;; Resource
+(mcp/defresource schema
+  "Database schema"
+  {:mime-type "application/edn"}
+  (get-current-schema))
+
+;; Start server
+(mcp/start! {:name "my-server" :version "1.0.0" :transport :stdio})
 ```
 
-**Implementations:**
-- `EdnPortRegistry` - Load from EDN files
-- `FunctionPortRegistry` - Register programmatically
-- `HybridPortRegistry` - Both approaches
-
-### 4. ProtocolAdapter (Protocol Translation)
-
-A **ProtocolAdapter** translates protocol-specific messages to/from ports.
+### Data-Driven API (Full Control)
 
 ```clojure
-(defprotocol ProtocolAdapter
-  (protocol-capabilities [this registry])      ; What can this server do?
-  (protocol-dispatch [this method params ctx])) ; Route method to port
-```
-
-**Implementations:**
-- ✅ **MCP** (Model Context Protocol) - `defport.protocols.mcp`
-- 🚧 **LSP** (Language Server Protocol) - Planned
-- 🚧 **DAP** (Debug Adapter Protocol) - Planned
-
-## Example: MCP Server
-
-### Quick Start with MCP
-
-```clojure
-(ns my-mcp-server
+(ns my-server
   (:require [defport.core :as core]
-            [defport.registry.core :as registry]
+            [defport.registry :as registry]
             [defport.protocols.mcp :as mcp]
             [defport.transports.http :as http]))
 
-;; 1. Create port registry and register tools
-(def registry (registry/create-function-registry))
+;; Create registry
+(def my-registry (registry/create-function-registry))
 
-(core/register-port! registry
+;; Register port
+(core/register-port! my-registry
   {:id :search-code
    :description "Search for code"
-   :input-schema {:type "object"
-                  :properties {:query {:type "string"}}}
-   :handler (fn [{:keys [params]}]
-              {:result {:matches [...]}})})
+   :input-schema {:type "object" :properties {:query {:type "string"}}}
+   :handler (fn [context]
+              {:result (search (get-in context [:params :query]))})})
 
-;; 2. Create MCP protocol adapter
-(def mcp-adapter (mcp/create-mcp-adapter
-                   {:server-info {:name "my-server" :version "1.0.0"}}))
+;; Create adapter
+(def adapter (mcp/create-mcp-adapter
+               {:server-info {:name "my-server" :version "1.0.0"}}))
 
-;; 3. Create HTTP transport
+;; Create transport and start
 (def transport (http/create-http-transport {:port 8080}))
 
-;; 4. Start server
 (core/transport-start transport
   (fn [request]
-    (let [context {:port-registry registry}]
-      (core/protocol-dispatch mcp-adapter
-                              (:method request)
-                              (:params request)
-                              context))))
+    (core/protocol-dispatch adapter (:method request) (:params request)
+      {:port-registry my-registry :transport transport})))
 ```
 
-See [examples/simple-mcp-server.clj](examples/simple-mcp-server.clj) for a complete working example.
-
-### Full MCP Server Example
+### REPL Introspection
 
 ```clojure
-(ns my-mcp-server
-  (:require [defport.registry.core :as registry]
-            [defport.transports.stdio :as stdio]))
+(require '[defport.inspect :as inspect])
+(require '[clojure.datafy :refer [datafy]])
 
-;; Your app's configuration (wherever you want it)
-(def config
-  {:ports-file "resources/my-app/mcp-tools.edn"})
+;; Inspect adapter state
+(datafy adapter)
+;; => {:type :mcp-adapter :protocol-version "2025-06-18" :methods [...]}
 
-;; Create components
-(def port-registry
-  (registry/create-edn-registry (:ports-file config)))
-
-(def transport
-  (stdio/create-stdio-transport))
-
-;; Start server
-(defn -main [& args]
-  (defport.core/transport-start transport
-    (fn [request]
-      ;; MCP protocol handling here
-      ;; (Will be provided by defport.protocols.mcp namespace)
-      )))
+;; Quick registry summary
+(inspect/registry-summary my-registry)
+;; => {:port-count 5 :ports [{:id :search-code ...}]}
 ```
+
+---
+
+## Observability
+
+Defport emits tap> events for zero-cost observability:
+
+```clojure
+;; Development - print all events
+(add-tap println)
+
+;; Production - route to metrics
+(add-tap (fn [e]
+           (when (and (map? e) (:event e))
+             (case (:event e)
+               :mcp/tool-call (prometheus/inc! :tool-calls {:tool (:tool e)})
+               :mcp/error (prometheus/inc! :errors)
+               nil))))
+```
+
+Events: `:mcp/tool-call`, `:mcp/error`, `:mcp/operation-cancelled`, `:mcp/subscription-added`, `:mcp/subscription-removed`
+
+---
 
 ## Platform Support
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| **JVM (Clojure)** | ✅ Primary | Full feature support |
-| **Node.js (CLJS)** | ✅ Supported | Reader conditionals for I/O |
-| **Browser (CLJS)** | ⚠️ Limited | WebSocket transport only |
-| **GraalVM Native** | 🚧 Future | Fast startup, small binaries |
-
-All core code is `.cljc` with reader conditionals for platform-specific operations.
-
-## Configuration Management
-
-**Defport is deliberately simple** - it doesn't impose configuration strategies.
-
-### Simple Approach (Just Load EDN)
-
-```clojure
-(def config (defport.util.edn/load-edn "config/server.edn"))
-```
-
-### Advanced Approach (Cascading Configs)
-
-If you need cascading configs with search paths, env var overrides, etc., implement it in your app. See [Defnet's config system](https://github.com/yourorg/defnet/blob/main/src/defnet/services/config.clj) for an example.
-
-Defport provides `defport.config/merge-configs` and `defport.config/validate-config` as helpers.
-
-## Project Structure
-
-```
-defport/                           # The library
-├── src/defport/
-│   ├── core.cljc                 # Core protocols
-│   ├── config.cljc               # Config utilities
-│   ├── registry/
-│   │   └── core.cljc            # Port registry implementations
-│   ├── transports/
-│   │   ├── stdio.cljc           # Stdio transport
-│   │   └── http.cljc            # HTTP transport
-│   ├── protocols/               # Protocol adapters (future)
-│   │   ├── mcp.cljc            # MCP adapter
-│   │   ├── lsp.cljc            # LSP adapter
-│   │   └── dap.cljc            # DAP adapter
-│   └── util/
-│       ├── edn.cljc            # EDN loading
-│       ├── protocol.cljc       # Request validation, cancellation
-│       ├── pagination.cljc     # Cursor pagination
-│       └── progress.cljc       # Progress notifications
-└── examples/
-    ├── ports-example.edn        # Example port definitions
-    └── simple-server/           # Example server (coming soon)
-
-your-app/                         # Your application
-├── resources/your-app/
-│   ├── tools.edn                # Your port definitions
-│   └── config.edn               # Your configuration
-└── src/your_app/
-    ├── handlers.clj             # Your business logic
-    └── server.clj               # Uses defport library
-```
-
-## Comparison
-
-| Aspect | Defport | Custom Implementation | Framework (LSP4J, etc.) |
-|--------|---------|----------------------|-------------------------|
-| **Protocols** | Multiple (MCP, LSP, DAP, custom) | One at a time | One specific |
-| **Platforms** | JVM, Node, Browser | JVM only | JVM only |
-| **Configuration** | Your choice | Your code | Framework's way |
-| **Learning Curve** | Low (simple library) | High (build everything) | Medium (learn framework) |
-| **Flexibility** | High (composable) | Highest (full control) | Low (framework constraints) |
-| **Reuse** | High (ports work across protocols) | Low | Medium |
-
-## Examples
-
-### EDN Port Registry
-
-```clojure
-(require '[defport.registry.core :as registry])
-
-(def ports (registry/create-edn-registry "resources/tools.edn"))
-
-(registry/list-ports ports)
-;=> [{:id :search-code ...} {:id :find-callers ...}]
-```
-
-### Function Port Registry
-
-```clojure
-(require '[defport.registry.core :as registry])
-
-(def ports (registry/create-function-registry))
-
-(registry/register-port! ports
-  {:id :my-tool
-   :input-schema {...}
-   :handler (fn [ctx] {:result "done"})})
-```
-
-### Hybrid Registry
-
-```clojure
-(def ports (registry/create-hybrid-registry
-             ["resources/base-tools.edn"]))  ; Load EDN first
-
-(registry/register-port! ports              ; Then add programmatic
-  {:id :dynamic-tool :handler ...})
-```
-
-### HTTP Transport
-
-```clojure
-(require '[defport.transports.http :as http])
-
-(def transport (http/create-http-transport
-                 {:port 8080
-                  :cors {:allow-origin "*"}}))
-
-(http/transport-start transport my-handler)
-;=> ✓ HTTP transport started on http://127.0.0.1:8080
-
-;; Endpoints:
-;; POST /rpc - JSON-RPC 2.0
-;; GET /health - Health check
-;; GET /info - Server info
-```
-
-### Stdio Transport
-
-```clojure
-(require '[defport.transports.stdio :as stdio])
-
-(def transport (stdio/create-stdio-transport))
-
-(stdio/transport-start transport my-handler)
-;; Reads JSON-RPC from stdin, writes to stdout
-```
-
-## Roadmap
-
-### ✅ Phase 1: Library Foundation (COMPLETE)
-- [x] Core protocols
-- [x] Utility infrastructure
-- [x] Registry system
-- [x] Transport implementations (stdio, HTTP)
-- [x] MCP protocol adapter
-- [x] Example MCP server
-- [x] Comprehensive test suite (14 tests, 68 assertions, 100% pass)
-
-### Phase 2: Integration & Production
-- [ ] Refactor Defnet to use defport
-- [ ] Production testing with real MCP clients
-- [ ] Performance benchmarking
-
-### Phase 3: LSP Support
-- [ ] LSP protocol adapter
-- [ ] Example LSP server
-- [ ] Validate abstraction with second protocol
-
-### Phase 4: Platform Expansion
-- [ ] Node.js build pipeline (Shadow-CLJS)
-- [ ] NPM package
-- [ ] Browser WebSocket transport
-
-### Phase 5: Production Ready
-- [ ] Comprehensive documentation
-- [ ] API stability guarantees
-- [ ] Performance benchmarking
-- [ ] Release v1.0.0
-
-## Related Projects
-
-- **[Defnet](https://github.com/yourorg/defnet)** - Clojure code intelligence MCP server (uses defport)
-- **[Scout](https://github.com/yourorg/scout)** - CDP-based web scraping MCP server (will use defport)
-
-## Contributing
-
-Defport is in active development. Contributions welcome:
-
-- Protocol adapters (LSP, DAP, custom)
-- Transport implementations (WebSocket, gRPC)
-- Documentation improvements
-- Bug reports and feature requests
-
-## License
-
-EPL 1.0 (Eclipse Public License) - same as Clojure
-
-## Credits
-
-Extracted from [Defnet](https://github.com/yourorg/defnet) by the Defnet team.
-
-Inspired by:
-- Ports & Adapters pattern (Hexagonal Architecture)
-- Ring's simplicity (middleware, handlers)
-- Pedestal's interceptors
-- Clojure's data-driven philosophy
+| JVM (Clojure) | ✅ Full | All features |
+| Node.js (CLJS) | ✅ Full | Via ClojureScript |
+| Browser (CLJS) | ⚠️ Limited | WebSocket only |
 
 ---
 
-**Questions? Issues?**
+## Why Defport?
 
-Open an issue on GitHub or join #defport on Clojurians Slack.
+| Aspect | Defport Approach |
+|--------|------------------|
+| Philosophy | Library, not framework - you stay in control |
+| Protocols | MCP today, LSP and DAP planned |
+| Auth/Metrics | You provide - integrates with your stack |
+| Ergonomics | Convenience macros without magic |
+
+---
+
+## Contributing
+
+Contributions welcome:
+
+- Protocol adapters (LSP, DAP)
+- Transport implementations (WebSocket, gRPC)
+- Documentation improvements
+- Bug reports
+
+## License
+
+EPL 1.0 (Eclipse Public License)
+
+---
+
+**Questions?** Open an issue or join #defport on Clojurians Slack.

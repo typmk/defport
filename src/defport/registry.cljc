@@ -1,4 +1,4 @@
-(ns defport.registry.core
+(ns defport.registry
   "Port registry implementations for defport.
 
   Provides three registry types:

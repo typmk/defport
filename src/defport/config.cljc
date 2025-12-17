@@ -100,3 +100,167 @@
              (merge-configs a b)
              b))
          configs))
+
+;; =============================================================================
+;; Performance Configuration Schema
+;; =============================================================================
+
+(def performance-config-schema
+  "Schema for performance-related configuration options.
+
+  Includes batch processing concurrency strategies and limits."
+  {:batch-processing
+   {:enabled {:type :boolean
+              :default false
+              :description "Enable concurrent batch processing"}
+    :strategy {:type :keyword
+               :enum #{:sequential :pmap :futures :core-async}
+               :default :sequential
+               :description "Batch processing strategy"}
+    :max-concurrency {:type :integer
+                      :default 10
+                      :min 1
+                      :max 100
+                      :description "Max concurrent operations (for :core-async)"}
+    :timeout-ms {:type :integer
+                 :default 30000
+                 :min 1000
+                 :max 300000
+                 :description "Timeout per item or overall (milliseconds)"}}})
+
+(def performance-config-defaults
+  "Default values for performance configuration."
+  {:batch-processing
+   {:enabled false
+    :strategy :sequential
+    :max-concurrency 10
+    :timeout-ms 30000}})
+
+(defn valid-batch-strategy?
+  "Check if batch strategy is valid.
+
+  Args:
+    strategy - Keyword to check
+
+  Returns:
+    Boolean - true if strategy is valid"
+  [strategy]
+  (contains? #{:sequential :pmap :futures :core-async} strategy))
+
+(defn validate-performance-config
+  "Validate performance configuration.
+
+  Args:
+    config - Performance config map (may be nested under :performance key)
+
+  Returns:
+    {:valid? true} or {:valid? false :errors [...]}
+
+  Example:
+    (validate-performance-config
+      {:batch-processing
+       {:enabled true
+        :strategy :pmap
+        :max-concurrency 10
+        :timeout-ms 30000}})"
+  [config]
+  (let [batch-config (get config :batch-processing {})
+        errors (atom [])]
+
+    ;; Validate enabled (must be boolean)
+    (when (contains? batch-config :enabled)
+      (when-not (boolean? (:enabled batch-config))
+        (swap! errors conj {:type :validation-failed
+                           :key :enabled
+                           :value (:enabled batch-config)
+                           :message "enabled must be boolean"})))
+
+    ;; Validate strategy (must be valid keyword)
+    (when (contains? batch-config :strategy)
+      (let [strategy (:strategy batch-config)]
+        (when-not (and (keyword? strategy)
+                       (valid-batch-strategy? strategy))
+          (swap! errors conj {:type :validation-failed
+                             :key :strategy
+                             :value strategy
+                             :message "strategy must be one of: :sequential :pmap :futures :core-async"}))))
+
+    ;; Validate max-concurrency (1-100)
+    (when (contains? batch-config :max-concurrency)
+      (let [mc (:max-concurrency batch-config)]
+        (when-not (and (integer? mc) (>= mc 1) (<= mc 100))
+          (swap! errors conj {:type :validation-failed
+                             :key :max-concurrency
+                             :value mc
+                             :message "max-concurrency must be integer between 1 and 100"}))))
+
+    ;; Validate timeout-ms (1000-300000)
+    (when (contains? batch-config :timeout-ms)
+      (let [timeout (:timeout-ms batch-config)]
+        (when-not (and (integer? timeout) (>= timeout 1000) (<= timeout 300000))
+          (swap! errors conj {:type :validation-failed
+                             :key :timeout-ms
+                             :value timeout
+                             :message "timeout-ms must be integer between 1000 and 300000"}))))
+
+    (if (empty? @errors)
+      {:valid? true}
+      {:valid? false :errors @errors})))
+
+(defn normalize-performance-config
+  "Normalize performance configuration with defaults.
+
+  Merges user config with defaults and validates.
+
+  Args:
+    config - User performance config (may be partial)
+
+  Returns:
+    Normalized config map with all defaults filled in
+
+  Example:
+    (normalize-performance-config
+      {:batch-processing {:enabled true :strategy :pmap}})
+    ;; => {:batch-processing {:enabled true
+    ;;                        :strategy :pmap
+    ;;                        :max-concurrency 10
+    ;;                        :timeout-ms 30000}}"
+  [config]
+  (let [normalized (merge-configs performance-config-defaults config)
+        validation (validate-performance-config normalized)]
+    (if (:valid? validation)
+      normalized
+      (throw (ex-info "Invalid performance configuration"
+                      {:validation validation
+                       :config config})))))
+
+(comment
+  ;; Usage examples
+
+  ;; Enable concurrent batch processing
+  (normalize-performance-config
+   {:batch-processing
+    {:enabled true
+     :strategy :pmap}})
+
+  ;; With timeout
+  (normalize-performance-config
+   {:batch-processing
+    {:enabled true
+     :strategy :futures
+     :timeout-ms 30000}})
+
+  ;; With concurrency limit
+  (normalize-performance-config
+   {:batch-processing
+    {:enabled true
+     :strategy :core-async
+     :max-concurrency 10}})
+
+  ;; Validation
+  (validate-performance-config
+   {:batch-processing
+    {:enabled true
+     :strategy :invalid}})
+  ;; => {:valid? false :errors [...]}
+  )

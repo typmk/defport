@@ -1,0 +1,18 @@
+{:source-paths ["../../src" ".."]
+ :dependencies [[org.clojure/clojure "1.11.1"]
+                [org.clojure/clojurescript "1.11.60"]]
+ :builds
+ {:node-server
+  {:target :node-script
+   :main mcp-test-server-node/main
+   :output-to "target/mcp_test_server_node.js"
+   :output-dir "target/node"
+   :compiler-options {:optimizations :simple
+                      :pretty-print true}}
+  :comprehensive-node-server
+  {:target :node-script
+   :main comprehensive-mcp-server-node/main
+   :output-to "target/comprehensive_mcp_server_node.js"
+   :output-dir "target/comprehensive-node"
+   :compiler-options {:optimizations :simple
+                      :pretty-print true}}}}

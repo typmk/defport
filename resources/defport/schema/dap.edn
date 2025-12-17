@@ -1,0 +1,739 @@
+;; Debug Adapter Protocol (DAP) v1.51 Schema
+;; Generated from https://microsoft.github.io/debug-adapter-protocol/debugAdapterProtocol.json
+;;
+;; This EDN schema defines:
+;; - All DAP request types and their arguments
+;; - All DAP event types and their bodies
+;; - All DAP data structures (Breakpoint, StackFrame, Variable, etc.)
+;; - Capability flags
+;;
+;; Usage:
+;;   (require '[clojure.edn :as edn])
+;;   (def dap-schema (edn/read-string (slurp "resources/defport/schema/dap.edn")))
+
+{:protocol {:name "Debug Adapter Protocol"
+            :version "1.51"
+            :spec-url "https://microsoft.github.io/debug-adapter-protocol/specification"}
+
+ ;; ============================================================================
+ ;; Message Types
+ ;; ============================================================================
+
+ :message-types #{:request :response :event}
+
+ ;; ============================================================================
+ ;; Request Commands
+ ;; ============================================================================
+
+ :requests
+ {;; --- Lifecycle ---
+  :initialize
+  {:description "Configure adapter with client capabilities"
+   :arguments {:clientID {:type :string :optional true :doc "Client identifier"}
+               :clientName {:type :string :optional true :doc "Human-readable client name"}
+               :adapterID {:type :string :doc "Adapter identifier"}
+               :locale {:type :string :optional true :doc "Locale for messages"}
+               :linesStartAt1 {:type :boolean :optional true :default true}
+               :columnsStartAt1 {:type :boolean :optional true :default true}
+               :pathFormat {:type :enum :values [:path :uri] :optional true :default :path}
+               :supportsVariableType {:type :boolean :optional true}
+               :supportsVariablePaging {:type :boolean :optional true}
+               :supportsRunInTerminalRequest {:type :boolean :optional true}
+               :supportsMemoryReferences {:type :boolean :optional true}
+               :supportsProgressReporting {:type :boolean :optional true}
+               :supportsInvalidatedEvent {:type :boolean :optional true}
+               :supportsMemoryEvent {:type :boolean :optional true}
+               :supportsArgsCanBeInterpretedByShell {:type :boolean :optional true}
+               :supportsStartDebuggingRequest {:type :boolean :optional true}
+               :supportsANSIStyling {:type :boolean :optional true}}
+   :response {:capabilities :Capabilities}}
+
+  :configurationDone
+  {:description "Signal completion of configuration phase"
+   :arguments {}
+   :response {}}
+
+  :launch
+  {:description "Start debuggee with optional debugging"
+   :arguments {:noDebug {:type :boolean :optional true :doc "Run without debugging"}
+               :__restart {:type :any :optional true :doc "Restart data"}}
+   ;; Additional args are adapter-specific
+   :response {}}
+
+  :attach
+  {:description "Connect to running debuggee"
+   :arguments {:__restart {:type :any :optional true}}
+   ;; Additional args are adapter-specific
+   :response {}}
+
+  :restart
+  {:description "Restart debug session"
+   :arguments {:arguments {:type :any :optional true :doc "New launch/attach args"}}
+   :response {}}
+
+  :disconnect
+  {:description "Disconnect and optionally terminate debuggee"
+   :arguments {:restart {:type :boolean :optional true}
+               :terminateDebuggee {:type :boolean :optional true}
+               :suspendDebuggee {:type :boolean :optional true}}
+   :response {}}
+
+  :terminate
+  {:description "Gracefully terminate debuggee"
+   :arguments {:restart {:type :boolean :optional true}}
+   :response {}}
+
+  :cancel
+  {:description "Cancel ongoing request or progress"
+   :arguments {:requestId {:type :integer :optional true}
+               :progressId {:type :string :optional true}}
+   :response {}}
+
+  ;; --- Breakpoints ---
+  :setBreakpoints
+  {:description "Set source code breakpoints"
+   :arguments {:source {:type :Source}
+               :breakpoints {:type [:vector :SourceBreakpoint] :optional true}
+               :lines {:type [:vector :integer] :optional true :deprecated true}
+               :sourceModified {:type :boolean :optional true}}
+   :response {:breakpoints {:type [:vector :Breakpoint]}}}
+
+  :setFunctionBreakpoints
+  {:description "Set function-level breakpoints"
+   :arguments {:breakpoints {:type [:vector :FunctionBreakpoint]}}
+   :response {:breakpoints {:type [:vector :Breakpoint]}}}
+
+  :setExceptionBreakpoints
+  {:description "Configure exception handling"
+   :arguments {:filters {:type [:vector :string]}
+               :filterOptions {:type [:vector :ExceptionFilterOptions] :optional true}
+               :exceptionOptions {:type [:vector :ExceptionOptions] :optional true}}
+   :response {:breakpoints {:type [:vector :Breakpoint] :optional true}}}
+
+  :setDataBreakpoints
+  {:description "Set data/watchpoint breakpoints"
+   :arguments {:breakpoints {:type [:vector :DataBreakpoint]}}
+   :response {:breakpoints {:type [:vector :Breakpoint]}}}
+
+  :setInstructionBreakpoints
+  {:description "Set instruction-level breakpoints"
+   :arguments {:breakpoints {:type [:vector :InstructionBreakpoint]}}
+   :response {:breakpoints {:type [:vector :Breakpoint]}}}
+
+  :breakpointLocations
+  {:description "Query possible breakpoint locations in range"
+   :arguments {:source {:type :Source}
+               :line {:type :integer}
+               :column {:type :integer :optional true}
+               :endLine {:type :integer :optional true}
+               :endColumn {:type :integer :optional true}}
+   :response {:breakpoints {:type [:vector :BreakpointLocation]}}}
+
+  :dataBreakpointInfo
+  {:description "Query data breakpoint availability"
+   :arguments {:variablesReference {:type :integer :optional true}
+               :name {:type :string}
+               :frameId {:type :integer :optional true}}
+   :response {:dataId {:type :string :nullable true}
+              :description {:type :string}
+              :accessTypes {:type [:vector :DataBreakpointAccessType] :optional true}
+              :canPersist {:type :boolean :optional true}}}
+
+  ;; --- Execution Control ---
+  :continue
+  {:description "Resume execution"
+   :arguments {:threadId {:type :integer}
+               :singleThread {:type :boolean :optional true}}
+   :response {:allThreadsContinued {:type :boolean :optional true}}}
+
+  :next
+  {:description "Step over to next statement"
+   :arguments {:threadId {:type :integer}
+               :singleThread {:type :boolean :optional true}
+               :granularity {:type :SteppingGranularity :optional true}}
+   :response {}}
+
+  :stepIn
+  {:description "Step into function"
+   :arguments {:threadId {:type :integer}
+               :singleThread {:type :boolean :optional true}
+               :targetId {:type :integer :optional true}
+               :granularity {:type :SteppingGranularity :optional true}}
+   :response {}}
+
+  :stepOut
+  {:description "Step out of current function"
+   :arguments {:threadId {:type :integer}
+               :singleThread {:type :boolean :optional true}
+               :granularity {:type :SteppingGranularity :optional true}}
+   :response {}}
+
+  :stepBack
+  {:description "Backward step execution"
+   :arguments {:threadId {:type :integer}
+               :singleThread {:type :boolean :optional true}
+               :granularity {:type :SteppingGranularity :optional true}}
+   :response {}}
+
+  :reverseContinue
+  {:description "Resume backward execution"
+   :arguments {:threadId {:type :integer}
+               :singleThread {:type :boolean :optional true}}
+   :response {}}
+
+  :restartFrame
+  {:description "Re-execute stack frame"
+   :arguments {:frameId {:type :integer}}
+   :response {}}
+
+  :goto
+  {:description "Jump to specific location"
+   :arguments {:threadId {:type :integer}
+               :targetId {:type :integer}}
+   :response {}}
+
+  :pause
+  {:description "Suspend execution"
+   :arguments {:threadId {:type :integer}}
+   :response {}}
+
+  ;; --- Information Retrieval ---
+  :threads
+  {:description "List all threads"
+   :arguments {}
+   :response {:threads {:type [:vector :Thread]}}}
+
+  :stackTrace
+  {:description "Get call stack for thread"
+   :arguments {:threadId {:type :integer}
+               :startFrame {:type :integer :optional true}
+               :levels {:type :integer :optional true}
+               :format {:type :StackFrameFormat :optional true}}
+   :response {:stackFrames {:type [:vector :StackFrame]}
+              :totalFrames {:type :integer :optional true}}}
+
+  :scopes
+  {:description "Get variable scopes for frame"
+   :arguments {:frameId {:type :integer}}
+   :response {:scopes {:type [:vector :Scope]}}}
+
+  :variables
+  {:description "Retrieve child variables"
+   :arguments {:variablesReference {:type :integer}
+               :filter {:type :enum :values [:indexed :named] :optional true}
+               :start {:type :integer :optional true}
+               :count {:type :integer :optional true}
+               :format {:type :ValueFormat :optional true}}
+   :response {:variables {:type [:vector :Variable]}}}
+
+  :setVariable
+  {:description "Modify variable value"
+   :arguments {:variablesReference {:type :integer}
+               :name {:type :string}
+               :value {:type :string}
+               :format {:type :ValueFormat :optional true}}
+   :response {:value {:type :string}
+              :type {:type :string :optional true}
+              :variablesReference {:type :integer :optional true}
+              :namedVariables {:type :integer :optional true}
+              :indexedVariables {:type :integer :optional true}
+              :memoryReference {:type :string :optional true}}}
+
+  :source
+  {:description "Fetch source code content"
+   :arguments {:source {:type :Source :optional true}
+               :sourceReference {:type :integer}}
+   :response {:content {:type :string}
+              :mimeType {:type :string :optional true}}}
+
+  :modules
+  {:description "Retrieve loaded modules"
+   :arguments {:startModule {:type :integer :optional true}
+               :moduleCount {:type :integer :optional true}}
+   :response {:modules {:type [:vector :Module]}
+              :totalModules {:type :integer :optional true}}}
+
+  :loadedSources
+  {:description "Get all loaded source files"
+   :arguments {}
+   :response {:sources {:type [:vector :Source]}}}
+
+  :evaluate
+  {:description "Evaluate expression"
+   :arguments {:expression {:type :string}
+               :frameId {:type :integer :optional true}
+               :context {:type :enum :values [:watch :repl :hover :clipboard :variables] :optional true}
+               :format {:type :ValueFormat :optional true}}
+   :response {:result {:type :string}
+              :type {:type :string :optional true}
+              :presentationHint {:type :VariablePresentationHint :optional true}
+              :variablesReference {:type :integer}
+              :namedVariables {:type :integer :optional true}
+              :indexedVariables {:type :integer :optional true}
+              :memoryReference {:type :string :optional true}}}
+
+  :setExpression
+  {:description "Set expression to value"
+   :arguments {:expression {:type :string}
+               :value {:type :string}
+               :frameId {:type :integer :optional true}
+               :format {:type :ValueFormat :optional true}}
+   :response {:value {:type :string}
+              :type {:type :string :optional true}
+              :presentationHint {:type :VariablePresentationHint :optional true}
+              :variablesReference {:type :integer :optional true}
+              :namedVariables {:type :integer :optional true}
+              :indexedVariables {:type :integer :optional true}
+              :memoryReference {:type :string :optional true}}}
+
+  :completions
+  {:description "Get code completions"
+   :arguments {:frameId {:type :integer :optional true}
+               :text {:type :string}
+               :column {:type :integer}
+               :line {:type :integer :optional true}}
+   :response {:targets {:type [:vector :CompletionItem]}}}
+
+  :exceptionInfo
+  {:description "Get exception details"
+   :arguments {:threadId {:type :integer}}
+   :response {:exceptionId {:type :string}
+              :description {:type :string :optional true}
+              :breakMode {:type :ExceptionBreakMode}
+              :details {:type :ExceptionDetails :optional true}}}
+
+  ;; --- Targets ---
+  :gotoTargets
+  {:description "Get goto targets"
+   :arguments {:source {:type :Source}
+               :line {:type :integer}
+               :column {:type :integer :optional true}}
+   :response {:targets {:type [:vector :GotoTarget]}}}
+
+  :stepInTargets
+  {:description "Get step-in targets"
+   :arguments {:frameId {:type :integer}}
+   :response {:targets {:type [:vector :StepInTarget]}}}
+
+  ;; --- Thread Management ---
+  :terminateThreads
+  {:description "Terminate specific threads"
+   :arguments {:threadIds {:type [:vector :integer] :optional true}}
+   :response {}}
+
+  ;; --- Memory ---
+  :readMemory
+  {:description "Read memory"
+   :arguments {:memoryReference {:type :string}
+               :offset {:type :integer :optional true}
+               :count {:type :integer}}
+   :response {:address {:type :string}
+              :unreadableBytes {:type :integer :optional true}
+              :data {:type :string :optional true :doc "Base64 encoded"}}}
+
+  :writeMemory
+  {:description "Write memory"
+   :arguments {:memoryReference {:type :string}
+               :offset {:type :integer :optional true}
+               :allowPartial {:type :boolean :optional true}
+               :data {:type :string :doc "Base64 encoded"}}
+   :response {:offset {:type :integer :optional true}
+              :bytesWritten {:type :integer :optional true}}}
+
+  ;; --- Disassembly ---
+  :disassemble
+  {:description "Disassemble code"
+   :arguments {:memoryReference {:type :string}
+               :offset {:type :integer :optional true}
+               :instructionOffset {:type :integer :optional true}
+               :instructionCount {:type :integer}
+               :resolveSymbols {:type :boolean :optional true}}
+   :response {:instructions {:type [:vector :DisassembledInstruction]}}}}
+
+ ;; ============================================================================
+ ;; Events
+ ;; ============================================================================
+
+ :events
+ {:initialized
+  {:description "Adapter ready for configuration"
+   :body {}}
+
+  :stopped
+  {:description "Debuggee execution paused"
+   :body {:reason {:type :string :doc "step|breakpoint|exception|pause|entry|goto|function breakpoint|data breakpoint|instruction breakpoint"}
+          :description {:type :string :optional true}
+          :threadId {:type :integer :optional true}
+          :preserveFocusHint {:type :boolean :optional true}
+          :text {:type :string :optional true}
+          :allThreadsStopped {:type :boolean :optional true}
+          :hitBreakpointIds {:type [:vector :integer] :optional true}}}
+
+  :continued
+  {:description "Debuggee execution resumed"
+   :body {:threadId {:type :integer}
+          :allThreadsContinued {:type :boolean :optional true}}}
+
+  :exited
+  {:description "Debuggee process terminated"
+   :body {:exitCode {:type :integer}}}
+
+  :terminated
+  {:description "Debugging session ended"
+   :body {:restart {:type :any :optional true}}}
+
+  :thread
+  {:description "Thread started or exited"
+   :body {:reason {:type :string :doc "started|exited"}
+          :threadId {:type :integer}}}
+
+  :output
+  {:description "Target produced output"
+   :body {:category {:type :string :optional true :doc "console|stdout|stderr|telemetry|important"}
+          :output {:type :string}
+          :group {:type :string :optional true :doc "start|startCollapsed|end"}
+          :variablesReference {:type :integer :optional true}
+          :source {:type :Source :optional true}
+          :line {:type :integer :optional true}
+          :column {:type :integer :optional true}
+          :data {:type :any :optional true}}}
+
+  :breakpoint
+  {:description "Breakpoint state changed"
+   :body {:reason {:type :string :doc "changed|new|removed"}
+          :breakpoint {:type :Breakpoint}}}
+
+  :module
+  {:description "Module state changed"
+   :body {:reason {:type :string :doc "new|changed|removed"}
+          :module {:type :Module}}}
+
+  :loadedSource
+  {:description "Source file state changed"
+   :body {:reason {:type :string :doc "new|changed|removed"}
+          :source {:type :Source}}}
+
+  :process
+  {:description "New process being debugged"
+   :body {:name {:type :string}
+          :systemProcessId {:type :integer :optional true}
+          :isLocalProcess {:type :boolean :optional true}
+          :startMethod {:type :string :optional true :doc "launch|attach|attachForSuspendedLaunch"}
+          :pointerSize {:type :integer :optional true}}}
+
+  :capabilities
+  {:description "Adapter capabilities changed"
+   :body {:capabilities {:type :Capabilities}}}
+
+  :progressStart
+  {:description "Long operation beginning"
+   :body {:progressId {:type :string}
+          :title {:type :string}
+          :requestId {:type :integer :optional true}
+          :cancellable {:type :boolean :optional true}
+          :message {:type :string :optional true}
+          :percentage {:type :number :optional true}}}
+
+  :progressUpdate
+  {:description "Progress status update"
+   :body {:progressId {:type :string}
+          :message {:type :string :optional true}
+          :percentage {:type :number :optional true}}}
+
+  :progressEnd
+  {:description "Progress completion"
+   :body {:progressId {:type :string}
+          :message {:type :string :optional true}}}
+
+  :invalidated
+  {:description "Debug state refresh required"
+   :body {:areas {:type [:vector :string] :optional true :doc "all|stacks|threads|variables"}
+          :threadId {:type :integer :optional true}
+          :stackFrameId {:type :integer :optional true}}}
+
+  :memory
+  {:description "Memory range updated"
+   :body {:memoryReference {:type :string}
+          :offset {:type :integer}
+          :count {:type :integer}}}}
+
+ ;; ============================================================================
+ ;; Data Types
+ ;; ============================================================================
+
+ :types
+ {:Capabilities
+  {:doc "Adapter capabilities"
+   :fields {:supportsConfigurationDoneRequest {:type :boolean :optional true}
+            :supportsFunctionBreakpoints {:type :boolean :optional true}
+            :supportsConditionalBreakpoints {:type :boolean :optional true}
+            :supportsHitConditionalBreakpoints {:type :boolean :optional true}
+            :supportsEvaluateForHovers {:type :boolean :optional true}
+            :exceptionBreakpointFilters {:type [:vector :ExceptionBreakpointsFilter] :optional true}
+            :supportsStepBack {:type :boolean :optional true}
+            :supportsSetVariable {:type :boolean :optional true}
+            :supportsRestartFrame {:type :boolean :optional true}
+            :supportsGotoTargetsRequest {:type :boolean :optional true}
+            :supportsStepInTargetsRequest {:type :boolean :optional true}
+            :supportsCompletionsRequest {:type :boolean :optional true}
+            :completionTriggerCharacters {:type [:vector :string] :optional true}
+            :supportsModulesRequest {:type :boolean :optional true}
+            :supportsRestartRequest {:type :boolean :optional true}
+            :supportsExceptionOptions {:type :boolean :optional true}
+            :supportsValueFormattingOptions {:type :boolean :optional true}
+            :supportsExceptionInfoRequest {:type :boolean :optional true}
+            :supportTerminateDebuggee {:type :boolean :optional true}
+            :supportSuspendDebuggee {:type :boolean :optional true}
+            :supportsDelayedStackTraceLoading {:type :boolean :optional true}
+            :supportsLoadedSourcesRequest {:type :boolean :optional true}
+            :supportsLogPoints {:type :boolean :optional true}
+            :supportsTerminateThreadsRequest {:type :boolean :optional true}
+            :supportsSetExpression {:type :boolean :optional true}
+            :supportsTerminateRequest {:type :boolean :optional true}
+            :supportsDataBreakpoints {:type :boolean :optional true}
+            :supportsReadMemoryRequest {:type :boolean :optional true}
+            :supportsWriteMemoryRequest {:type :boolean :optional true}
+            :supportsDisassembleRequest {:type :boolean :optional true}
+            :supportsCancelRequest {:type :boolean :optional true}
+            :supportsBreakpointLocationsRequest {:type :boolean :optional true}
+            :supportsClipboardContext {:type :boolean :optional true}
+            :supportsSteppingGranularity {:type :boolean :optional true}
+            :supportsInstructionBreakpoints {:type :boolean :optional true}
+            :supportsExceptionFilterOptions {:type :boolean :optional true}
+            :supportsSingleThreadExecutionRequests {:type :boolean :optional true}
+            :supportsRunInTerminalRequest {:type :boolean :optional true}}}
+
+  :Breakpoint
+  {:doc "Information about a breakpoint"
+   :fields {:id {:type :integer :optional true}
+            :verified {:type :boolean}
+            :message {:type :string :optional true}
+            :source {:type :Source :optional true}
+            :line {:type :integer :optional true}
+            :column {:type :integer :optional true}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}
+            :instructionReference {:type :string :optional true}
+            :offset {:type :integer :optional true}}}
+
+  :SourceBreakpoint
+  {:doc "Breakpoint in source code"
+   :fields {:line {:type :integer}
+            :column {:type :integer :optional true}
+            :condition {:type :string :optional true}
+            :hitCondition {:type :string :optional true}
+            :logMessage {:type :string :optional true}
+            :mode {:type :string :optional true}}}
+
+  :FunctionBreakpoint
+  {:doc "Function breakpoint"
+   :fields {:name {:type :string}
+            :condition {:type :string :optional true}
+            :hitCondition {:type :string :optional true}}}
+
+  :DataBreakpoint
+  {:doc "Data/watchpoint breakpoint"
+   :fields {:dataId {:type :string}
+            :accessType {:type :DataBreakpointAccessType :optional true}
+            :condition {:type :string :optional true}
+            :hitCondition {:type :string :optional true}}}
+
+  :InstructionBreakpoint
+  {:doc "Instruction breakpoint"
+   :fields {:instructionReference {:type :string}
+            :offset {:type :integer :optional true}
+            :condition {:type :string :optional true}
+            :hitCondition {:type :string :optional true}
+            :mode {:type :string :optional true}}}
+
+  :BreakpointLocation
+  {:doc "Possible breakpoint location"
+   :fields {:line {:type :integer}
+            :column {:type :integer :optional true}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}}}
+
+  :StackFrame
+  {:doc "Stack frame in call stack"
+   :fields {:id {:type :integer}
+            :name {:type :string}
+            :source {:type :Source :optional true}
+            :line {:type :integer}
+            :column {:type :integer}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}
+            :canRestart {:type :boolean :optional true}
+            :instructionPointerReference {:type :string :optional true}
+            :moduleId {:type :any :optional true}
+            :presentationHint {:type :string :optional true :doc "normal|label|subtle"}}}
+
+  :Scope
+  {:doc "Variable scope"
+   :fields {:name {:type :string}
+            :presentationHint {:type :string :optional true :doc "arguments|locals|registers|globals"}
+            :variablesReference {:type :integer}
+            :namedVariables {:type :integer :optional true}
+            :indexedVariables {:type :integer :optional true}
+            :expensive {:type :boolean :optional true}
+            :source {:type :Source :optional true}
+            :line {:type :integer :optional true}
+            :column {:type :integer :optional true}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}}}
+
+  :Variable
+  {:doc "Variable value"
+   :fields {:name {:type :string}
+            :value {:type :string}
+            :type {:type :string :optional true}
+            :presentationHint {:type :VariablePresentationHint :optional true}
+            :evaluateName {:type :string :optional true}
+            :variablesReference {:type :integer}
+            :namedVariables {:type :integer :optional true}
+            :indexedVariables {:type :integer :optional true}
+            :memoryReference {:type :string :optional true}}}
+
+  :VariablePresentationHint
+  {:doc "Variable display hints"
+   :fields {:kind {:type :string :optional true :doc "property|method|class|data|event|baseClass|innerClass|interface|mostDerivedClass|virtual|dataBreakpoint"}
+            :attributes {:type [:vector :string] :optional true :doc "static|constant|readOnly|rawString|hasObjectId|canHaveObjectId|hasSideEffects|hasDataBreakpoint"}
+            :visibility {:type :string :optional true :doc "public|private|protected|internal|final"}
+            :lazy {:type :boolean :optional true}}}
+
+  :Source
+  {:doc "Source file information"
+   :fields {:name {:type :string :optional true}
+            :path {:type :string :optional true}
+            :sourceReference {:type :integer :optional true}
+            :presentationHint {:type :string :optional true :doc "normal|emphasize|deemphasize"}
+            :origin {:type :string :optional true}
+            :sources {:type [:vector :Source] :optional true}
+            :adapterData {:type :any :optional true}
+            :checksums {:type [:vector :Checksum] :optional true}}}
+
+  :Thread
+  {:doc "Thread information"
+   :fields {:id {:type :integer}
+            :name {:type :string}}}
+
+  :Module
+  {:doc "Module information"
+   :fields {:id {:type :any}
+            :name {:type :string}
+            :path {:type :string :optional true}
+            :isOptimized {:type :boolean :optional true}
+            :isUserCode {:type :boolean :optional true}
+            :version {:type :string :optional true}
+            :symbolStatus {:type :string :optional true}
+            :symbolFilePath {:type :string :optional true}
+            :dateTimeStamp {:type :string :optional true}
+            :addressRange {:type :string :optional true}}}
+
+  :CompletionItem
+  {:doc "Completion suggestion"
+   :fields {:label {:type :string}
+            :text {:type :string :optional true}
+            :sortText {:type :string :optional true}
+            :detail {:type :string :optional true}
+            :type {:type :CompletionItemType :optional true}
+            :start {:type :integer :optional true}
+            :length {:type :integer :optional true}
+            :selectionStart {:type :integer :optional true}
+            :selectionLength {:type :integer :optional true}}}
+
+  :ExceptionDetails
+  {:doc "Exception information"
+   :fields {:message {:type :string :optional true}
+            :typeName {:type :string :optional true}
+            :fullTypeName {:type :string :optional true}
+            :evaluateName {:type :string :optional true}
+            :stackTrace {:type :string :optional true}
+            :innerException {:type [:vector :ExceptionDetails] :optional true}}}
+
+  :GotoTarget
+  {:doc "Goto target location"
+   :fields {:id {:type :integer}
+            :label {:type :string}
+            :line {:type :integer}
+            :column {:type :integer :optional true}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}
+            :instructionPointerReference {:type :string :optional true}}}
+
+  :StepInTarget
+  {:doc "Step-in target"
+   :fields {:id {:type :integer}
+            :label {:type :string}
+            :line {:type :integer :optional true}
+            :column {:type :integer :optional true}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}}}
+
+  :DisassembledInstruction
+  {:doc "Disassembled instruction"
+   :fields {:address {:type :string}
+            :instructionBytes {:type :string :optional true}
+            :instruction {:type :string}
+            :symbol {:type :string :optional true}
+            :location {:type :Source :optional true}
+            :line {:type :integer :optional true}
+            :column {:type :integer :optional true}
+            :endLine {:type :integer :optional true}
+            :endColumn {:type :integer :optional true}
+            :presentationHint {:type :string :optional true}}}}
+
+ ;; ============================================================================
+ ;; Enums
+ ;; ============================================================================
+
+ :enums
+ {:StopReason
+  {:values ["step" "breakpoint" "exception" "pause" "entry" "goto"
+            "function breakpoint" "data breakpoint" "instruction breakpoint"]}
+
+  :ThreadReason
+  {:values ["started" "exited"]}
+
+  :OutputCategory
+  {:values ["console" "stdout" "stderr" "telemetry" "important"]}
+
+  :BreakpointReason
+  {:values ["changed" "new" "removed"]}
+
+  :ModuleReason
+  {:values ["new" "changed" "removed"]}
+
+  :SourceReason
+  {:values ["new" "changed" "removed"]}
+
+  :EvaluateContext
+  {:values ["watch" "repl" "hover" "clipboard" "variables"]}
+
+  :VariablesFilter
+  {:values ["indexed" "named"]}
+
+  :DataBreakpointAccessType
+  {:values ["read" "write" "readWrite"]}
+
+  :SteppingGranularity
+  {:values ["statement" "line" "instruction"]}
+
+  :CompletionItemType
+  {:values ["method" "function" "constructor" "field" "variable" "class"
+            "interface" "module" "property" "unit" "value" "enum"
+            "keyword" "snippet" "text" "color" "file" "reference" "customcolor"]}
+
+  :ExceptionBreakMode
+  {:values ["never" "always" "unhandled" "userUnhandled"]}
+
+  :InvalidatedAreas
+  {:values ["all" "stacks" "threads" "variables"]}
+
+  :ProcessStartMethod
+  {:values ["launch" "attach" "attachForSuspendedLaunch"]}
+
+  :StackFramePresentationHint
+  {:values ["normal" "label" "subtle"]}
+
+  :ScopePresentationHint
+  {:values ["arguments" "locals" "registers" "globals"]}}}

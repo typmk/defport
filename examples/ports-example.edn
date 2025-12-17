@@ -1,92 +1,89 @@
-{:description "Example port definitions for defport-based applications"
+{:desc "Port definitions for defport-based applications"
+
+ ;; ============================================================================
+ ;; CONVENTIONS
+ ;; ============================================================================
+ ;;
+ ;; ABBREVIATIONS:
+ ;;   :desc   = :description    :in    = :input-schema   :out  = :output-schema
+ ;;   :fn     = :handler        :meta  = :metadata       :req  = :required
+ ;;   :props  = :properties
+ ;;
+ ;; DEFAULTS (don't specify):
+ ;;   :id          -> Inferred from map key
+ ;;   :name        -> String of id ("search-code")
+ ;;   :dangerous?  -> false
+ ;;   :cacheable?  -> true (read-only ops)
+ ;;   :protocols   -> #{:mcp :lsp :dap} (all)
+ ;;   :token-budget -> 1000
+ ;;
+ ;; Progressive disclosure: simple → complex
+ ;; ============================================================================
 
  :ports
- {;; Example 1: Simple port with function handler
+ {
+  ;; -------------------------------------------------------------------------
+  ;; MINIMAL (4 lines) - description, schema, handler
+  ;; -------------------------------------------------------------------------
   :search-code
-  {:id :search-code
-   :description "Search for code by semantic similarity"
-   :input-schema {:type "object"
-                  :properties {:query {:type "string"
-                                      :description "Search query"}
-                               :limit {:type "integer"
-                                      :default 10
-                                      :minimum 1
-                                      :maximum 100}}
-                  :required ["query"]}
-   :output-schema {:type "array"
-                   :items {:type "object"
-                          :properties {:function-name {:type "string"}
-                                     :file-path {:type "string"}
-                                     :score {:type "number"}}}}
-   :handler my.app/search-code-handler
-   :metadata {:token-budget 1000
-              :dangerous? false
-              :protocols #{:mcp :lsp}
-              :cacheable? true
-              :cache-ttl-sec 300}}
+  {:desc "Search for code by semantic similarity"
+   :in   {:type "object" :props {:query {:type "string"}} :req ["query"]}
+   :fn   my.app/search-code}
 
-  ;; Example 2: Port with pipeline dispatch
+  ;; -------------------------------------------------------------------------
+  ;; WITH OUTPUT SCHEMA
+  ;; -------------------------------------------------------------------------
   :find-callers
-  {:id :find-callers
-   :description "Find all functions that call the target function"
-   :input-schema {:type "object"
-                  :properties {:function-name {:type "string"}
-                               :limit {:type "integer" :default 50}}
-                  :required ["function-name"]}
-   :output-schema {:type "array"
-                   :items {:type "string"}}
-   :handler my.app/find-callers-handler
-   :metadata {:token-budget 500
-              :dangerous? false
-              :execution-strategy :pipeline
-              :pipeline :graph-query}}
+  {:desc "Find all functions that call the target"
+   :in   {:type "object"
+          :props {:function-name {:type "string"}
+                  :limit {:type "integer" :default 50}}
+          :req ["function-name"]}
+   :out  {:type "array" :items {:type "string"}}
+   :fn   my.app/find-callers}
 
-  ;; Example 3: Dangerous port (requires approval)
+  ;; -------------------------------------------------------------------------
+  ;; WITH METADATA
+  ;; -------------------------------------------------------------------------
+  :analyze-complexity
+  {:desc "Analyze cyclomatic complexity of code"
+   :in   {:type "object" :props {:file-path {:type "string"}} :req ["file-path"]}
+   :fn   my.app/analyze-complexity
+   :meta {:token-budget 2000
+          :pipeline :analysis-pipeline}}
+
+  ;; -------------------------------------------------------------------------
+  ;; DANGEROUS (modifies files)
+  ;; -------------------------------------------------------------------------
   :rename-function
-  {:id :rename-function
-   :description "Rename a function across the codebase"
-   :input-schema {:type "object"
-                  :properties {:old-name {:type "string"}
-                               :new-name {:type "string"}
-                               :dry-run {:type "boolean" :default true}}
-                  :required ["old-name" "new-name"]}
-   :output-schema {:type "object"
-                   :properties {:files-changed {:type "integer"}
-                               :preview {:type "array"}}}
-   :handler my.app/rename-function-handler
-   :metadata {:dangerous? true
-              :requires-approval? true
-              :requires-clean-git? true
-              :token-budget 2000}}
+  {:desc "Rename a function across the codebase"
+   :in   {:type "object"
+          :props {:old-name {:type "string"}
+                  :new-name {:type "string"}
+                  :dry-run {:type "boolean" :default true}}
+          :req ["old-name" "new-name"]}
+   :out  {:type "object" :props {:files-changed {:type "integer"}}}
+   :fn   my.app/rename-function
+   :meta {:dangerous? true
+          :requires-approval? true
+          :requires-clean-git? true}}
 
-  ;; Example 4: CDP tool (Scout-style)
+  ;; -------------------------------------------------------------------------
+  ;; PROTOCOL-SPECIFIC
+  ;; -------------------------------------------------------------------------
   :navigate-url
-  {:id :navigate-url
-   :description "Navigate to a URL using Chrome DevTools Protocol"
-   :input-schema {:type "object"
-                  :properties {:url {:type "string"}
-                               :wait-for-idle {:type "boolean" :default true}
-                               :session-id {:type "string"}}
-                  :required ["url"]}
-   :output-schema {:type "object"
-                   :properties {:status {:type "string"}
-                               :title {:type "string"}}}
-   :handler scout.impl/navigate-handler
-   :metadata {:protocol :cdp
-              :dangerous? false
-              :timeout-ms 30000}}
+  {:desc "Navigate browser to URL (CDP)"
+   :in   {:type "object" :props {:url {:type "string"}} :req ["url"]}
+   :fn   scout.impl/navigate
+   :meta {:protocols #{:cdp} :timeout-ms 30000}}
 
-  ;; Example 5: LSP-specific port
   :code-completion
-  {:id :code-completion
-   :description "Provide code completion suggestions"
-   :input-schema {:type "object"
-                  :properties {:text-document {:type "object"}
-                               :position {:type "object"}}
-                  :required ["text-document" "position"]}
-   :output-schema {:type "array"
-                   :items {:type "object"}}
-   :handler my.lsp/completion-handler
-   :metadata {:protocols #{:lsp}
-              :capability "textDocument/completion"
-              :trigger-characters ["." ":" "/"]}}}}
+  {:desc "Provide code completion suggestions"
+   :in   {:type "object"
+          :props {:text-document {:type "object"}
+                  :position {:type "object"}}
+          :req ["text-document" "position"]}
+   :fn   my.lsp/completion
+   :meta {:protocols #{:lsp}
+          :capability "textDocument/completion"
+          :trigger-characters ["." ":" "/"]}}}}

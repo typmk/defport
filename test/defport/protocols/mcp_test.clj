@@ -3,7 +3,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [defport.core :as core]
             [defport.protocols.mcp :as mcp]
-            [defport.registry.core :as registry]))
+            [defport.registry :as registry]))
 
 ;; ============================================================================
 ;; Test Fixtures
@@ -107,7 +107,7 @@
 
       (let [caps (core/protocol-capabilities adapter reg)]
         (is (map? (:resources caps)))
-        (is (= false (:subscribe (:resources caps))))
+        (is (= true (:subscribe (:resources caps))))  ; subscriptions enabled by default
         (is (= false (:listChanged (:resources caps))))))))
 
 (deftest test-handle-initialize
@@ -257,15 +257,13 @@
       (is (= -32602 (:code (:error result)))))))
 
 (deftest test-handle-ping
-  (testing "Ping returns pong"
+  (testing "Ping returns empty response per MCP 2025-06-18 spec"
     (let [adapter (mcp/create-mcp-adapter
                     {:server-info {:name "test-server" :version "1.0.0"}})
           context {:port-registry (create-test-registry)}
           result (core/protocol-dispatch adapter "ping" {} context)]
-
-      (is (true? (:pong result)))
-      (is (= "test-server" (:server result)))
-      (is (= "1.0.0" (:version result))))))
+      ;; Per MCP spec: Receiver MUST respond promptly with an empty response
+      (is (= {} result) "Ping should return empty object per MCP spec"))))
 
 (deftest test-unknown-method
   (testing "Unknown method returns error"
@@ -316,3 +314,205 @@
           result (core/protocol-dispatch adapter "custom/method" {} context)]
 
       (is (= {:custom "response"} result)))))
+
+;; ============================================================================
+;; New Feature Tests (ObjectContent & Dangerous Tool Filtering)
+;; ============================================================================
+
+(deftest test-object-content-support
+  (testing "Tools/call returns TextContent with JSON for all results (spec-compliant)"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)]
+      ;; Register tool that returns structured data
+      (core/register-port! reg
+        {:id :structured-tool
+         :name "structured-tool"
+         :handler (fn [_context]
+                   {:result {:data [{:id 1 :name "item1"}
+                                   {:id 2 :name "item2"}]
+                            :total 2}})})
+
+      (let [context {:port-registry reg}
+            result (core/protocol-dispatch adapter "tools/call"
+                     {:name "structured-tool"} context)]
+
+        (is (nil? (:error result)))
+        (is (vector? (:content result)))
+        (is (= 1 (count (:content result))))
+        (let [content (first (:content result))]
+          ;; MCP 2025-06-18 spec: ObjectContent doesn't exist
+          ;; All structured data must use TextContent with JSON serialization
+          (is (= "text" (:type content)))
+          (is (string? (:text content)))
+          ;; Verify JSON contains expected data
+          (is (re-find #"\"total\":2" (:text content)))
+          (is (re-find #"\"data\"" (:text content)))))))
+
+  (testing "Tools/call returns TextContent for simple results"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)]
+      ;; Register tool that returns simple string
+      (core/register-port! reg
+        {:id :simple-tool
+         :name "simple-tool"
+         :handler (fn [_context]
+                   {:result "simple response"})})
+
+      (let [context {:port-registry reg}
+            result (core/protocol-dispatch adapter "tools/call"
+                     {:name "simple-tool"} context)]
+
+        (is (nil? (:error result)))
+        (is (vector? (:content result)))
+        (is (= 1 (count (:content result))))
+        (let [content (first (:content result))]
+          (is (= "text" (:type content)))
+          (is (string? (:text content))))))))
+
+(deftest test-dangerous-tool-filtering
+  (testing "Dangerous tools filtered by default"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)]
+      ;; Register safe and dangerous tools
+      (core/register-port! reg
+        {:id :safe-tool
+         :name "safe-tool"
+         :handler test-port-handler})
+      (core/register-port! reg
+        {:id :dangerous-tool
+         :name "dangerous-tool"
+         :handler test-port-handler
+         :metadata {:dangerous true}})
+
+      (let [context {:port-registry reg}
+            result (core/protocol-dispatch adapter "tools/list" {} context)]
+
+        (is (= 1 (count (:tools result))))
+        (is (= "safe-tool" (:name (first (:tools result))))))))
+
+  (testing "Dangerous tools included when refactoring enabled via option"
+    (let [adapter (mcp/create-mcp-adapter {:enable-refactoring true})
+          reg (registry/create-function-registry)]
+      ;; Register safe and dangerous tools
+      (core/register-port! reg
+        {:id :safe-tool
+         :name "safe-tool"
+         :handler test-port-handler})
+      (core/register-port! reg
+        {:id :dangerous-tool
+         :name "dangerous-tool"
+         :handler test-port-handler
+         :metadata {:dangerous true}})
+
+      (let [context {:port-registry reg}
+            result (core/protocol-dispatch adapter "tools/list" {} context)]
+
+        (is (= 2 (count (:tools result))))
+        (is (some #(= "dangerous-tool" (:name %)) (:tools result))))))
+
+  (testing "Custom tool filter overrides default"
+    (let [adapter (mcp/create-mcp-adapter
+                    {:tool-filter (fn [tools]
+                                   ;; Custom logic: only keep tools with 'custom' in name
+                                   (filter #(re-find #"custom" (name (:id %))) tools))})
+          reg (registry/create-function-registry)]
+      ;; Register multiple tools
+      (core/register-port! reg
+        {:id :custom-tool
+         :name "custom-tool"
+         :handler test-port-handler})
+      (core/register-port! reg
+        {:id :other-tool
+         :name "other-tool"
+         :handler test-port-handler})
+
+      (let [context {:port-registry reg}
+            result (core/protocol-dispatch adapter "tools/list" {} context)]
+
+        (is (= 1 (count (:tools result))))
+        (is (= "custom-tool" (:name (first (:tools result)))))))))
+
+(deftest test-refactoring-capability-flag
+  (testing "Refactoring capability not present by default"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)]
+      (core/register-port! reg
+        {:id :tool1 :name "tool1" :handler test-port-handler})
+
+      (let [caps (core/protocol-capabilities adapter reg)]
+        (is (nil? (:refactoring caps))))))
+
+  (testing "Refactoring capability present when enabled"
+    (let [adapter (mcp/create-mcp-adapter {:enable-refactoring true})
+          reg (registry/create-function-registry)]
+      (core/register-port! reg
+        {:id :tool1 :name "tool1" :handler test-port-handler})
+
+      (let [caps (core/protocol-capabilities adapter reg)]
+        (is (map? (:refactoring caps)))
+        (is (true? (:enabled (:refactoring caps)))))))
+
+  (testing "Initialize returns refactoring capability when enabled"
+    (let [adapter (mcp/create-mcp-adapter
+                    {:enable-refactoring true
+                     :server-info {:name "test-server" :version "1.0.0"}})
+          context {:port-registry (create-test-registry)
+                  :refactoring-enabled? true}
+          result (core/protocol-dispatch adapter "initialize" {} context)]
+
+      (is (= "2025-06-18" (:protocolVersion result)))
+      (is (map? (get-in result [:capabilities :refactoring])))
+      (is (true? (get-in result [:capabilities :refactoring :enabled]))))))
+
+(deftest test-logging-set-level
+  (testing "Sets log level for session"
+    (let [adapter (mcp/create-mcp-adapter)
+          context {:port-registry (create-test-registry)
+                   :session {:id "test-session"}}
+          result (core/protocol-dispatch adapter "logging/setLevel"
+                                          {:level "warning"}
+                                          context)]
+      (is (= {} result))
+      (is (= :warning (mcp/get-session-log-level "test-session")))))
+
+  (testing "Validates log level"
+    (let [adapter (mcp/create-mcp-adapter)
+          context {:port-registry (create-test-registry)}
+          result (core/protocol-dispatch adapter "logging/setLevel"
+                                          {:level "invalid"}
+                                          context)]
+      (is (contains? result :error))
+      (is (= -32602 (get-in result [:error :code])))))
+
+  (testing "Filters log messages based on level"
+    (let [session-id :test-session]
+      ;; Set minimum level to warning
+      (mcp/set-session-log-level! session-id :warning)
+
+      ;; debug should be filtered
+      (is (false? (mcp/should-send-log? session-id :debug)))
+      ;; info should be filtered
+      (is (false? (mcp/should-send-log? session-id :info)))
+      ;; warning should pass
+      (is (true? (mcp/should-send-log? session-id :warning)))
+      ;; error should pass
+      (is (true? (mcp/should-send-log? session-id :error)))))
+
+  (testing "Default log level is debug (show all)"
+    (is (= :debug (mcp/get-session-log-level :new-session)))
+    (is (true? (mcp/should-send-log? :new-session :debug)))
+    (is (true? (mcp/should-send-log? :new-session :info)))
+    (is (true? (mcp/should-send-log? :new-session :warning)))
+    (is (true? (mcp/should-send-log? :new-session :error)))))
+
+(deftest test-logging-capability
+  (testing "Initialize returns logging capability"
+    (let [adapter (mcp/create-mcp-adapter)
+          context {:port-registry (create-test-registry)}
+          result (core/protocol-dispatch adapter "initialize"
+                                          {:protocolVersion "2025-06-18"
+                                           :capabilities {}
+                                           :clientInfo {:name "test" :version "1.0"}}
+                                          context)]
+      (is (contains? (:capabilities result) :logging))
+      (is (map? (get-in result [:capabilities :logging]))))))
