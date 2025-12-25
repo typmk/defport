@@ -598,6 +598,40 @@
                     {:port-id port-id
                      :available (core/list-registered-ports)}))))
 
+(defn expose-all-ports!
+  "Expose all registered ports that have :lsp metadata.
+
+   This automatically finds ports in the defport.core registry that have
+   :metadata {:lsp {:method \"textDocument/...\" :transform :locations}}
+   and registers them as LSP handlers.
+
+   Unlike expose-port! (which maps a single port manually), this uses
+   the port's own :lsp metadata to determine the method and transform.
+
+   Example:
+     ;; First register ports with LSP metadata:
+     (defport/register-port!
+       {:id :find-callers
+        :handler find-callers
+        :metadata {:lsp {:method \"textDocument/references\"
+                         :transform :locations}}})
+
+     ;; Then expose all at once:
+     (expose-all-ports!)
+
+   Requires a server to be defined first via deflsp.
+
+   Returns list of registered method names."
+  []
+  (when-let [srv @*server]
+    (let [adapter (:adapter srv)
+          _ (lsp/register-ports! adapter)]
+      ;; Update capabilities for registered methods
+      (doseq [[method _] (lsp/find-ports-for-lsp)]
+        (when-let [cap-key (some (fn [[k v]] (when (= v method) k)) handler-methods)]
+          (swap! *capabilities assoc (get method->capability cap-key cap-key) true)))
+      (keys (lsp/find-ports-for-lsp)))))
+
 ;; ============================================================================
 ;; Introspection
 ;; ============================================================================

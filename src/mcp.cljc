@@ -89,13 +89,15 @@
 ;; Internal State
 ;; ============================================================================
 
-(defonce ^:private *server (atom nil))
-(defonce ^:private *tools (atom []))
-(defonce ^:private *resources (atom []))
-(defonce ^:private *prompts (atom []))
+(defonce *server (atom nil))
+(defonce *tools (atom []))
+(defonce *resources (atom []))
+(defonce *prompts (atom []))
 (defonce ^:private *schemas (atom {}))
 (defonce ^:private *transport (atom nil))
 (defonce ^:private *running? (atom false))
+(defonce ^:private *lifespan-context (atom nil))
+(defonce ^:private *lifecycle-hooks (atom {}))
 
 ;; ============================================================================
 ;; Context Protocol (Level 2)
@@ -107,9 +109,10 @@
   (report-progress [ctx current total] [ctx current total message] "Report progress")
   (read-resource [ctx uri] "Read a resource")
   (get-state [ctx key] "Get request state")
-  (set-state [ctx key value] "Set request state"))
+  (set-state [ctx key value] "Set request state")
+  (get-lifespan [ctx] [ctx key] "Get lifespan context or specific key"))
 
-(defrecord Context [server request state*]
+(defrecord Context [server request state* lifespan-ctx*]
   IContext
   (log [_ level message]
     (platform/eprintln (str "[" (name level) "] " message)))
@@ -119,7 +122,11 @@
     (platform/eprintln (str "Progress: " current "/" total " - " message)))
   (read-resource [_ uri] nil)
   (get-state [_ key] (get @state* key))
-  (set-state [_ key value] (swap! state* assoc key value)))
+  (set-state [_ key value] (swap! state* assoc key value))
+  (get-lifespan [this] (get-lifespan this nil))
+  (get-lifespan [_ key]
+    (let [ctx (if (fn? lifespan-ctx*) (lifespan-ctx*) lifespan-ctx*)]
+      (if key (get ctx key) ctx))))
 
 ;; ============================================================================
 ;; Schema Registry
@@ -151,7 +158,11 @@
 ;; Server Record & Builder
 ;; ============================================================================
 
-(defrecord Server [name version tools resources prompts options transport-config])
+(defrecord Server [name version tools resources prompts options transport-config
+                   ;; Lifecycle fields
+                   lifespan-config     ; {:setup fn :cleanup fn} or nil
+                   lifecycle-hooks     ; {:on-start fn :on-stop fn :on-initialize fn ...}
+                   lifespan-context*]) ; atom holding current lifespan context
 
 (defn server
   "Create a server (fluent API entry point).
@@ -161,10 +172,22 @@
         (add-tool :add handler {:description \"Add\"})
         (with-transport :http {:port 8080})
         (build!)
+        (start!))
+
+  With lifecycle:
+    (-> (server \"Demo\")
+        (with-lifespan {:setup (fn [] {:db (open-conn)})
+                        :cleanup (fn [{:keys [db]}] (close-conn db))})
+        (with-hooks {:on-start (fn [srv] (log \"Starting\"))
+                     :on-stop (fn [srv] (log \"Stopping\"))})
+        (add-tool :search search-fn)
+        (build!)
         (start!))"
   ([name] (server name "1.0.0"))
   ([name version]
-   (let [s (->Server name version (atom []) (atom []) (atom []) (atom {}) (atom nil))]
+   (let [s (->Server name version
+                     (atom []) (atom []) (atom []) (atom {}) (atom nil)
+                     nil nil (atom nil))]
      (reset! *server s)
      s)))
 
@@ -254,14 +277,17 @@
                      (some #(when (= :context (second %)) (first %))
                            (partition 3 params)))
 
-        pnames (or (mapv :name (:params parsed)) malli-keys [])]
+        pnames (or (mapv :name (:params parsed)) malli-keys [])
+        params-sym (gensym "params")
+        ;; Create explicit gensym for context to use in both fn param and let bindings
+        ctx-sym (gensym "context")]
 
-    `(let [handler# (fn [context#]
-                      (let [params# (:params context#)
-                            ~@(when ctx-name [ctx-name 'context#])
+    `(let [handler# (fn [~ctx-sym]
+                      (let [~params-sym (:params ~ctx-sym)
+                            ~@(when ctx-name [ctx-name ctx-sym])
                             ~@(mapcat (fn [p]
                                         (let [n (if (map? p) (:name p) p)]
-                                          [n `(get params# ~(clojure.core/name n))]))
+                                          [n `(get ~params-sym ~(clojure.core/name n))]))
                                       pnames)]
                         (sugar/->text-content (do ~@body))))
            schema# ~schema-form
@@ -291,10 +317,11 @@
                         [(first args) (rest args)]
                         [[] args])
         [doc body] (sugar/extract-doc-and-body args)
-        parsed (sugar/parse-params params)]
-    `(let [handler# (fn [params#]
+        parsed (sugar/parse-params params)
+        params-sym (gensym "params")]
+    `(let [handler# (fn [~params-sym]
                       (let [~@(mapcat (fn [p]
-                                        [(:name p) `(get params# ~(keyword (:name p)))])
+                                        [(:name p) `(get ~params-sym ~(keyword (:name p)))])
                                       (:params parsed))]
                         ~@body))
            res# {:uri ~uri
@@ -321,10 +348,11 @@
         parsed (sugar/parse-params params)
         prompt-args (mapv (fn [{:keys [name]}]
                             {:name (clojure.core/name name) :required true})
-                          (:params parsed))]
-    `(let [handler# (fn [params#]
+                          (:params parsed))
+        params-sym (gensym "params")]
+    `(let [handler# (fn [~params-sym]
                       (let [~@(mapcat (fn [p]
-                                        [(:name p) `(get params# ~(keyword (:name p)))])
+                                        [(:name p) `(get ~params-sym ~(keyword (:name p)))])
                                       (:params parsed))]
                         {:messages (do ~@body)}))
            p# {:name ~(clojure.core/name prompt-name)
@@ -399,23 +427,103 @@
   (swap! (:options server) merge opts)
   server)
 
+(defn with-lifespan
+  "Configure lifespan resource management (fluent API).
+
+  Lifespan provides setup/cleanup lifecycle for resources that should
+  live for the duration of the server. Resources are available to all
+  handlers via (get-lifespan ctx :key).
+
+  Options:
+    :setup   - (fn [] context-map) called on start!, returns resources
+    :cleanup - (fn [ctx] ...) called on stop!, receives setup result
+
+  Example:
+    (-> (server \"Demo\")
+        (with-lifespan {:setup (fn [] {:db (open-conn) :cache (atom {})})
+                        :cleanup (fn [{:keys [db]}] (close-conn db))})
+        (add-tool :search search-fn)
+        (build!)
+        (start!))
+
+  In handlers:
+    (deftool search [query :- :string, ctx :- :context]
+      (let [db (get-lifespan ctx :db)]
+        (query-db db query)))
+
+  For lazy initialization (defnet pattern):
+    (with-lifespan {:setup (fn [] {:get-conn #(ensure-conn!)})})
+    ;; Then in handler: ((get-lifespan ctx :get-conn))"
+  [server {:keys [setup cleanup] :as config}]
+  (assoc server :lifespan-config config))
+
+(defn with-hooks
+  "Configure lifecycle hooks (fluent API).
+
+  Hooks are called at various lifecycle points. All hooks receive
+  the server as first argument. Hooks are optional and independent.
+
+  Supported hooks:
+    :on-start      - (fn [server] ...) called when server starts
+    :on-stop       - (fn [server] ...) called when server stops
+    :on-initialize - (fn [server session] ...) called per MCP client connection
+    :on-shutdown   - (fn [server session] ...) called per MCP client disconnect
+
+  Example:
+    (-> (server \"Demo\")
+        (with-hooks {:on-start (fn [srv] (log/info \"Starting\" (:name srv)))
+                     :on-stop (fn [srv] (log/info \"Stopping\"))
+                     :on-initialize (fn [srv session]
+                                      (ensure-system-initialized!))})
+        (build!)
+        (start!))
+
+  Composing hooks:
+    (-> (server \"Demo\")
+        (with-hooks {:on-start log-start})
+        (with-hooks {:on-start register-instance})  ; Merges, both called
+        ...)"
+  [server hooks]
+  (update server :lifecycle-hooks merge hooks))
+
 ;; ============================================================================
 ;; Request Handler
 ;; ============================================================================
 
 (defn- create-handler
-  "Create JSON-RPC request handler."
-  [server-info tools resources prompts]
+  "Create JSON-RPC request handler.
+
+  Args:
+    server-info     - {:name \"...\" :version \"...\"}
+    tools           - vector of tool definitions
+    resources       - vector of resource definitions
+    prompts         - vector of prompt definitions
+    lifespan-ctx-fn - (fn [] context-map) or context-map, lifespan resources
+    hooks           - {:on-initialize fn :on-shutdown fn ...}"
+  [server-info tools resources prompts lifespan-ctx-fn hooks]
   (fn [request]
     (let [method (:method request)
-          params (:params request)]
+          params (:params request)
+          ;; Resolve lifespan context (can be fn for lazy or map for eager)
+          get-lifespan-ctx (if (fn? lifespan-ctx-fn)
+                             lifespan-ctx-fn
+                             (constantly lifespan-ctx-fn))]
       (case method
         "initialize"
-        {:result {:protocolVersion "2025-06-18"
-                  :capabilities {:tools {}
-                                 :resources (when (seq resources) {})
-                                 :prompts (when (seq prompts) {})}
-                  :serverInfo server-info}}
+        (do
+          ;; Call on-initialize hook if provided
+          (when-let [on-init (:on-initialize hooks)]
+            (try
+              (on-init {:client-info (:clientInfo params)
+                        :protocol-version (:protocolVersion params)})
+              (catch #?(:clj Exception :cljs js/Error) e
+                (platform/eprintln (str "on-initialize hook error: "
+                                        #?(:clj (.getMessage e) :cljs (.-message e)))))))
+          {:result {:protocolVersion "2025-06-18"
+                    :capabilities {:tools {}
+                                   :resources (when (seq resources) {})
+                                   :prompts (when (seq prompts) {})}
+                    :serverInfo server-info}})
 
         "tools/list"
         {:result {:tools (mapv #(select-keys % [:name :description :input-schema :inputSchema])
@@ -426,7 +534,7 @@
               tool (some #(when (= (:name %) tool-name) %) tools)]
           (if tool
             (try
-              (let [ctx (->Context nil request (atom {}))
+              (let [ctx (->Context nil request (atom {}) get-lifespan-ctx)
                     result ((:handler tool) (assoc ctx :params (:arguments params)))]
                 {:result (if (:content result) result {:content [{:type "text" :text (str result)}]})})
               (catch #?(:clj Exception :cljs js/Error) e
@@ -488,46 +596,117 @@
         all-resources @(:resources server)
         all-prompts @(:prompts server)
         server-info {:name (:name server) :version (:version server)}
-        handler (create-handler server-info all-tools all-resources all-prompts)]
+        ;; Get lifespan context accessor (fn or nil)
+        lifespan-ctx-fn (when (:lifespan-config server)
+                          (fn []
+                            (or @(:lifespan-context* server)
+                                ;; Return empty map if not yet initialized
+                                {})))
+        hooks (:lifecycle-hooks server)
+        handler (create-handler server-info all-tools all-resources all-prompts
+                                lifespan-ctx-fn hooks)]
     (swap! (:options server) assoc :handler handler)
     server))
 
 (defn start!
   "Start the server (fluent API).
 
+  Lifecycle sequence:
+  1. Run lifespan :setup function (if configured)
+  2. Call :on-start hook
+  3. Start transport
+  4. Block until transport stops
+  5. Call :on-stop hook
+  6. Run lifespan :cleanup function
+
   (-> (server \"Demo\")
       (add-tool ...)
       (with-transport :http {:port 8080})
+      (with-lifespan {:setup (fn [] {:db conn})
+                      :cleanup (fn [{:keys [db]}] (close db))})
       (build!)
       (start!))"
   [server]
   (let [transport-config @(:transport-config server)
         transport-type (or (:type transport-config) :stdio)
         transport-opts (or (:opts transport-config) {})
-        handler (get-in @(:options server) [:handler])]
+        handler (get-in @(:options server) [:handler])
+        lifespan-config (:lifespan-config server)
+        hooks (:lifecycle-hooks server)]
 
     (when-not handler
       (throw (ex-info "Server not built. Call build! first." {})))
+
+    ;; Run lifespan setup
+    (when-let [setup-fn (:setup lifespan-config)]
+      (let [ctx (setup-fn)]
+        (reset! (:lifespan-context* server) ctx)
+        (reset! *lifespan-context ctx)))
+
+    ;; Call on-start hook
+    (when-let [on-start (:on-start hooks)]
+      (try
+        (on-start server)
+        (catch #?(:clj Exception :cljs js/Error) e
+          (platform/eprintln (str "on-start hook error: "
+                                  #?(:clj (.getMessage e) :cljs (.-message e)))))))
 
     (sugar/print-startup-banner
      (:name server) (:version server)
      transport-type (count @(:tools server)) "Tools"
      @(:tools server))
 
-    (sugar/start-transport! handler
-                            {:type transport-type
-                             :port (:port transport-opts 8080)
-                             :transport-atom *transport
-                             :running-atom *running?})
+    (try
+      (sugar/start-transport! handler
+                              {:type transport-type
+                               :port (:port transport-opts 8080)
+                               :transport-atom *transport
+                               :running-atom *running?})
 
-    (platform/eprintln "Server ready.")
-    server))
+      (platform/eprintln "Server ready.")
+      server
+
+      (finally
+        ;; Call on-stop hook
+        (when-let [on-stop (:on-stop hooks)]
+          (try
+            (on-stop server)
+            (catch #?(:clj Exception :cljs js/Error) e
+              (platform/eprintln (str "on-stop hook error: "
+                                      #?(:clj (.getMessage e) :cljs (.-message e)))))))
+
+        ;; Run lifespan cleanup
+        (when-let [cleanup-fn (:cleanup lifespan-config)]
+          (when-let [ctx @(:lifespan-context* server)]
+            (try
+              (cleanup-fn ctx)
+              (catch #?(:clj Exception :cljs js/Error) e
+                (platform/eprintln (str "lifespan cleanup error: "
+                                        #?(:clj (.getMessage e) :cljs (.-message e)))))))
+          (reset! (:lifespan-context* server) nil)
+          (reset! *lifespan-context nil))))))
 
 (defn run!
   "Run the MCP server (simple API).
 
-  (run!)                              ; stdio
-  (run! {:transport :http :port 8080}) ; HTTP"
+  Options:
+    :transport - :stdio (default) or :http
+    :port      - HTTP port (default 8080)
+    :lifespan  - {:setup fn :cleanup fn} for resource lifecycle
+    :on-start  - (fn [server] ...) called when server starts
+    :on-stop   - (fn [server] ...) called when server stops
+    :on-initialize - (fn [session] ...) called per MCP client connection
+
+  Examples:
+    (run!)                              ; stdio, no lifespan
+
+    (run! {:transport :http :port 8080}) ; HTTP
+
+    ;; With lifespan (defnet pattern)
+    (run! {:lifespan {:setup (fn [] {:conn (db/open-conn)})
+                      :cleanup (fn [{:keys [conn]}] (db/close conn))}
+           :on-start (fn [srv] (log/info \"Starting\"))
+           :on-initialize (fn [session] (ensure-initialized!))})"
   ([] (run! {}))
   ([opts]
    (let [srv (or @*server (server "defport"))
@@ -535,28 +714,102 @@
          all-resources (vec (concat @*resources @(:resources srv)))
          all-prompts (vec (concat @*prompts @(:prompts srv)))
          server-info {:name (:name srv) :version (:version srv)}
-         handler (create-handler server-info all-tools all-resources all-prompts)
+         ;; Merge lifespan from opts with server config
+         lifespan-config (or (:lifespan opts) (:lifespan-config srv))
+         ;; Merge hooks from opts with server config
+         hooks (merge (:lifecycle-hooks srv)
+                      (select-keys opts [:on-start :on-stop :on-initialize :on-shutdown]))
          transport-type (or (:transport opts) :stdio)]
 
-     (sugar/print-startup-banner
-      (:name srv) (:version srv)
-      transport-type (count all-tools) "Tools"
-      all-tools)
+     ;; Run lifespan setup
+     (when-let [setup-fn (:setup lifespan-config)]
+       (let [ctx (setup-fn)]
+         (when (:lifespan-context* srv)
+           (reset! (:lifespan-context* srv) ctx))
+         (reset! *lifespan-context ctx)))
 
-     (sugar/start-transport! handler
-                             {:type transport-type
-                              :port (or (:port opts) 8080)
-                              :transport-atom *transport
-                              :running-atom *running?})
+     ;; Call on-start hook
+     (when-let [on-start (:on-start hooks)]
+       (try
+         (on-start srv)
+         (catch #?(:clj Exception :cljs js/Error) e
+           (platform/eprintln (str "on-start hook error: "
+                                   #?(:clj (.getMessage e) :cljs (.-message e)))))))
 
-     (platform/eprintln "Server ready.")
-     #?(:clj @(promise) :cljs nil))))
+     ;; Create lifespan context accessor
+     (let [lifespan-ctx-fn (when lifespan-config
+                             (fn [] (or @*lifespan-context {})))
+           handler (create-handler server-info all-tools all-resources all-prompts
+                                   lifespan-ctx-fn hooks)]
+
+       (sugar/print-startup-banner
+        (:name srv) (:version srv)
+        transport-type (count all-tools) "Tools"
+        all-tools)
+
+       (try
+         (sugar/start-transport! handler
+                                 {:type transport-type
+                                  :port (or (:port opts) 8080)
+                                  :transport-atom *transport
+                                  :running-atom *running?})
+
+         (platform/eprintln "Server ready.")
+         #?(:clj @(promise) :cljs nil)
+
+         (finally
+           ;; Call on-stop hook
+           (when-let [on-stop (:on-stop hooks)]
+             (try
+               (on-stop srv)
+               (catch #?(:clj Exception :cljs js/Error) e
+                 (platform/eprintln (str "on-stop hook error: "
+                                         #?(:clj (.getMessage e) :cljs (.-message e)))))))
+
+           ;; Run lifespan cleanup
+           (when-let [cleanup-fn (:cleanup lifespan-config)]
+             (when-let [ctx @*lifespan-context]
+               (try
+                 (cleanup-fn ctx)
+                 (catch #?(:clj Exception :cljs js/Error) e
+                   (platform/eprintln (str "lifespan cleanup error: "
+                                           #?(:clj (.getMessage e) :cljs (.-message e)))))))
+             (reset! *lifespan-context nil))))))))
 
 (defn stop!
-  "Stop the server."
+  "Stop the server and run cleanup.
+
+  If lifespan was configured, runs cleanup function.
+  Calls :on-stop hook if configured.
+  Resets all global state."
   []
+  ;; Call on-stop hook if registered
+  (when-let [hooks @*lifecycle-hooks]
+    (when-let [on-stop (:on-stop hooks)]
+      (try
+        (on-stop @*server)
+        (catch #?(:clj Exception :cljs js/Error) e
+          (platform/eprintln (str "on-stop hook error: "
+                                  #?(:clj (.getMessage e) :cljs (.-message e))))))))
+
+  ;; Run lifespan cleanup
+  (when-let [srv @*server]
+    (when-let [lifespan-config (:lifespan-config srv)]
+      (when-let [cleanup-fn (:cleanup lifespan-config)]
+        (when-let [ctx @*lifespan-context]
+          (try
+            (cleanup-fn ctx)
+            (catch #?(:clj Exception :cljs js/Error) e
+              (platform/eprintln (str "lifespan cleanup error: "
+                                      #?(:clj (.getMessage e) :cljs (.-message e))))))))))
+
+  ;; Stop transport
   (sugar/stop-transport! {:transport-atom *transport
                           :running-atom *running?})
+
+  ;; Reset state
+  (reset! *lifespan-context nil)
+  (reset! *lifecycle-hooks {})
   (reset! *tools [])
   (reset! *resources [])
   (reset! *prompts [])

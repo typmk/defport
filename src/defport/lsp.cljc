@@ -37,6 +37,7 @@
    ## Spec Reference
    https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/"
   (:require [defport.core :as core]
+            [clojure.string :as str]
             #?(:clj [cheshire.core :as json])
             #?(:cljs [cljs.reader :as reader]))
   #?(:clj (:import [java.io BufferedReader BufferedWriter InputStreamReader OutputStreamWriter]
@@ -1514,3 +1515,132 @@
                               diagnostics (assoc :diagnostics diagnostics)
                               only (assoc :only only))})]
     (:result response)))
+
+;; =============================================================================
+;; Section 13: Port-Based Routing (Cross-Protocol)
+;; =============================================================================
+;; Enable exposing defport.core ports as LSP methods via metadata.
+;;
+;; Example port with LSP metadata:
+;;   (defport.core/register-port!
+;;     {:id :find-callers
+;;      :handler find-callers-handler
+;;      :metadata {:lsp {:method "textDocument/references"
+;;                       :transform :locations}}})
+;;
+;; Usage:
+;;   (def adapter (create-adapter {...}))
+;;   (register-ports! adapter)  ; Auto-registers ports with :lsp metadata
+
+(defn- transform-result
+  "Transform port result to LSP format based on :transform metadata.
+
+   Transforms:
+   - :locations - Vector of locations [{:file :line}] -> Location[]
+   - :location  - Single {:file :line} -> Location
+   - :hover     - {:callers :callees :name} -> Hover
+   - :symbols   - Vector of {:qn :file :line} -> SymbolInformation[]
+   - nil        - Return result as-is"
+  [transform result]
+  (case transform
+    :locations
+    (mapv (fn [item]
+            (location (str "file://" (or (:file item) ""))
+                      (or (:line item) 0) 0
+                      (or (:line item) 0) 100))
+          (or (:callers result) (:locations result) result))
+
+    :location
+    (when-let [loc (first (or (:locations result) [result]))]
+      (location (str "file://" (or (:file loc) ""))
+                (or (:line loc) 0) 0
+                (or (:line loc) 0) 100))
+
+    :hover
+    {:contents (markdown
+                (str "## " (or (:function result) (:name result) "Unknown") "\n\n"
+                     (when-let [c (:callers result)]
+                       (str "**Callers:** " (if (number? c) c (count c)) "\n"))
+                     (when-let [c (:callees result)]
+                       (str "**Callees:** " (if (number? c) c (count c)) "\n"))
+                     (when-let [t (:tests result)]
+                       (str "**Tests:** " (count t)))))}
+
+    :symbols
+    (mapv (fn [item]
+            (symbol-information
+              {:name (or (:qn item) (:name item))
+               :kind :function
+               :location (location (str "file://" (or (:file item) ""))
+                                   (or (:line item) 0) 0
+                                   (or (:line item) 0) 100)}))
+          (or (:results result) result))
+
+    ;; Default: return as-is
+    result))
+
+(defn- create-port-handler
+  "Create LSP handler from port definition."
+  [port-def]
+  (let [handler (:handler port-def)
+        transform (get-in port-def [:metadata :lsp :transform])]
+    (fn [params context]
+      (try
+        (let [;; Convert LSP params to port params
+              port-params (cond-> {}
+                            (:textDocument params)
+                            (assoc :file (some-> (:textDocument params)
+                                                 :uri
+                                                 (str/replace #"^file://" "")))
+                            (:position params)
+                            (-> (assoc :line (:line (:position params)))
+                                (assoc :column (:character (:position params))))
+                            ;; Pass through function-name if provided
+                            (:function-name params)
+                            (assoc :function-name (:function-name params))
+                            ;; Pass through query if provided
+                            (:query params)
+                            (assoc :query (:query params)))
+              ;; Execute port handler
+              result (handler (assoc context :params port-params))
+              ;; Extract result data
+              data (or (:result result) result)]
+          (transform-result transform data))
+        (catch #?(:clj Exception :cljs :default) e
+          (error-response :internal-error
+                          #?(:clj (.getMessage e)
+                             :cljs (.-message e))))))))
+
+(defn find-ports-for-lsp
+  "Find all registered ports with :lsp metadata.
+
+   Returns map of {lsp-method port-def}"
+  []
+  (->> (core/list-registered-port-defs)
+       (filter #(get-in % [:metadata :lsp :method]))
+       (map (fn [p] [(get-in p [:metadata :lsp :method]) p]))
+       (into {})))
+
+(defn register-ports!
+  "Register all ports with :lsp metadata as LSP method handlers.
+
+   Automatically finds ports in defport.core registry that have
+   :metadata {:lsp {:method \"textDocument/...\"}} and registers
+   them as handlers on the adapter.
+
+   Example:
+     (def adapter (create-adapter {...}))
+     (register-ports! adapter)
+
+   After this, LSP requests like textDocument/references will
+   be routed to the matching port handler."
+  [adapter]
+  (doseq [[method port-def] (find-ports-for-lsp)]
+    (tap> {:event :lsp/registering-port
+           :method method
+           :port-id (:id port-def)})
+    (register-method! adapter method (create-port-handler port-def)))
+  adapter)
+
+;; Note: expose-port! is provided by the lsp convenience namespace (src/lsp.cljc)
+;; which offers a user-friendlier API with :as keyword mapping.

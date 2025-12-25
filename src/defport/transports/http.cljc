@@ -16,7 +16,7 @@
        (let [app (fn [request]
                   (try
                     (condp = (:uri request)
-                      "/rpc"
+                      "/mcp"
                       (let [body (slurp (:body request))
                             json-request (json/parse-string body true)
                             response (handler json-request)
@@ -124,7 +124,7 @@
   Returns HttpTransport instance.
 
   Endpoints:
-  - POST /rpc - JSON-RPC 2.0 endpoint
+  - POST /mcp - JSON-RPC 2.0 endpoint
   - GET /health - Health check
   - GET /info - Server information
 
