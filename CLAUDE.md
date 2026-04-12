@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **defport** is a **LOW-LEVEL LIBRARY** for building protocol servers (MCP, LSP, DAP). It provides protocol adapters, NOT application frameworks.
 
-**Status:** 299 tests, 1845 assertions, 0 failures | 100% MCP 2025-11-25 spec compliant
+**Status:** 304 tests, 1856 assertions, 0 failures | 100% MCP 2025-11-25 spec compliant | Core library compiles clean on JVM and Node (CLJS)
 
 ## Critical: Library Philosophy
 
@@ -88,21 +88,31 @@ After the cross-platform cleanup, remaining `#?(:clj ... :cljs ...)` conditional
 
 | File | Purpose |
 |------|---------|
-| `src/defport/core.cljc` | Core protocols |
-| `src/defport/dsl.cljc` | Progressive disclosure DSL (deftool, defprompt, etc.) |
-| `src/defport/protocols/mcp.cljc` | MCP 2025-06-18 adapter |
-| `src/defport/registry/core.cljc` | Registry implementations |
-| `src/defport/transports/*.cljc` | Transport implementations |
-| `src/defport/inspect.clj` | REPL introspection (datafy/nav) |
+| `src/defport/core.cljc` | Core protocols (Port, Transport, ProtocolAdapter, PortRegistry, ProtocolClient contract) |
+| `src/defport/mcp.cljc` | MCP 2025-11-25 server adapter — pure cross-platform |
+| `src/defport/dap.cljc` | DAP server adapter — pure cross-platform |
+| `src/defport/lsp.cljc` | LSP server adapter — pure cross-platform |
+| `src/defport/registry.cljc` | Registry implementations (EDN, Function, Hybrid) |
+| `src/defport/sugar.cljc` | Shared sugar infrastructure (`deftool`, `defprompt`, lifecycle hooks) |
+| `src/defport/transports/stdio.cljc` | Stdio transport (JVM http-kit + Node callbacks in one file) |
+| `src/defport/transports/http.cljc` | HTTP transport (JVM + Node, same pattern) |
+| `src/defport/util/platform.cljc` | **The cross-platform abstraction layer** — error handling, JSON, time, `try-any` macro, `unwrap` extension point |
+| `src/defport/inspect.cljc` | REPL introspection (datafy/nav), fully cross-platform |
+| `src/defport/testing/server.cljc` | Test server helpers (cross-platform) |
+| `src/defport/testing/client.clj` | Test client harness (JVM-only, subprocess spawning) |
+| `src/mcp.cljc`, `src/dap.cljc`, `src/lsp.cljc` | Top-level sugar facades (single-segment namespaces: `mcp`, `dap`, `lsp`) |
 
 ## Common Commands
 
 ```bash
-# Run all tests
+# Run all tests (304 tests / 1856 assertions)
 clojure -M:kaocha
 
-# Run specific test namespace
+# Run a specific test namespace
 clojure -M:kaocha --focus defport.protocols.mcp-test
+
+# Run a specific deftest
+clojure -M:kaocha --focus defport.protocols.mcp-test/test-handler-returns-future
 
 # REPL with test paths
 clojure -M:test:examples

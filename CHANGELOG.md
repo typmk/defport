@@ -7,6 +7,200 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 7 — Cross-Platform Restructure (2026-04-12) 🔨
+
+**Status:** ✅ **Complete** | **Tests:** 304 tests, 1856 assertions, 0 failures
+
+A comprehensive restructure of defport to match its stated philosophy.
+Three interlocking improvements: (1) eliminate global mutable state,
+(2) honestly scope the library to server-adapter role, (3) concentrate
+platform-specific code in a single abstraction layer.
+
+#### Breaking changes
+
+- **Client-mode features removed.** `defport.mcp-client`,
+  `defport.dap-client`, `defport.lsp-client` (the subprocess-spawning
+  client modules) do not exist. `McpClient` record and
+  `create-mcp-client` are also removed from `defport.mcp`.
+  These features fell outside defport's concern (adapter, not driver).
+  **If your application needs to spawn and drive external MCP/LSP/DAP
+  servers**, implement `defport.core/ProtocolClient` in your own code
+  using `babashka.process`, `ProcessBuilder`, or Node's `child_process`.
+- **`create-server` / `start!` / `stop!` removed from `defport.core`.**
+  These were "not yet implemented" stubs that threw on call. They were
+  never part of the working API.
+- **`defport.core/register-port!` renamed to `register-global-port!`**
+  for the global-registry convenience function. The protocol method
+  `register-port!` on `PortRegistry` now resolves correctly — calling
+  `(core/register-port! registry port-def)` dispatches to the protocol
+  method instead of hitting an arity error.
+- **Namespace `defport.protocols.mcp` is now `defport.mcp`** (similarly
+  for dap/lsp). Pre-existing drift from commit 2d7918e that broke tests
+  and dependents.
+- **Handler results now pass through `platform/unwrap`.** Handlers may
+  return plain values OR async types (`future`, `promise`, `delay`,
+  `manifold.deferred` via feature detection). Previously only plain
+  values were supported.
+
+#### Added
+
+**`defport.util.platform` — cross-platform abstraction layer**
+- `error-message` / `error-type` — cross-platform exception accessors
+- `try-any` macro — catches Throwable on JVM, `:default` on CLJS via
+  `(:ns &env)` detection. Eliminates `catch` reader conditionals at
+  call sites.
+- `unwrap` — feature-detecting unwrapper for async return types.
+  Handles `IDeref` (JVM: promise, future, delay, atom), manifold
+  deferreds via `requiring-resolve` (optional), and raises a clear
+  error for unresolvable js/Promise cases.
+- `process-id` — cross-platform current PID
+- `utf8-byte-length` — for Content-Length framing on both platforms
+
+**`McpAdapter` instance state**
+- `create-protocol-state` returns a single atom holding an immutable
+  map. Each `McpAdapter` owns its own state via a `:state*` field
+  threaded into handler context on `protocol-dispatch`. Previously
+  8 `defonce` globals (`seen-request-ids*`, `active-operations*`,
+  `resource-subscriptions*`, `change-notifications-enabled*`,
+  `elicitation-state*`, `session-log-levels*`, `client-roots*`,
+  `sampling-state*`).
+- `active-operations` flattened from nested `(atom false)` cancellation
+  flags into `:active-operations` and `:cancelled-operations` sets.
+- Multi-server-per-process now works without state pollution.
+
+**`handle-tools-call` forwards `:metadata`**
+- Handlers that return `{:content [...] :metadata {...}}` now have
+  metadata preserved in the MCP response. Enables returning sampling
+  request info, progress hints, and other auxiliary payloads.
+
+**Server capability advertising**
+- `:listChanged true` now advertised for `tools`, `prompts`, and
+  `resources` since the adapter supports the corresponding notification
+  methods (`notify-tools-list-changed`, etc.).
+
+**Node (CLJS) stdio transport**
+- `StdioTransport` CLJS branch uses synchronous `readline` callbacks.
+  Handler bodies are plain synchronous code on Node — no async
+  primitives required. Promise-returning handlers are awaited via
+  `.then` chaining at the transport layer.
+
+**Documentation**
+- `docs/ARCHITECTURE.md` gained two major sections:
+  - **Protocol Intersection** — why defport exists as a library
+    distinct from any single protocol implementation. MCP/LSP/DAP
+    share JSON-RPC dispatch, cancellation, state, and content
+    formatting; protocol adapters are thin mappings over the shared
+    core.
+  - **Concurrency Model** — full rationale for the synchronous contract
+    (Ring-style). Stdio vs HTTP deployment models. Why no async
+    primitive in defport's core. How users bring their own async. The
+    server/client asymmetry.
+- Design principles added (6, 7, 8): Synchronous by Default, Users
+  Bring Their Own Async, Protocol Intersection Not Union.
+- `CLAUDE.md` gained a "Core Design Principles (non-negotiable)"
+  section capturing six rules for future work.
+
+#### Fixed
+
+**Test suite restoration**
+- Pre-existing namespace drift (`defport.protocols.mcp` →
+  `defport.mcp`) updated across 36 files.
+- `core.cljc` `register-port!` shadowing bug — rename global
+  convenience function to `register-global-port!`.
+- `testing/compliance.cljc` `validate-field-naming` no longer
+  recurses into user-defined JSON Schema (`:inputSchema`,
+  `:outputSchema`, `:arguments`, etc.). MCP only mandates camelCase
+  for its own protocol fields; snake_case is valid in user-controlled
+  tool schemas. This unblocks real-world consumers with Python-style
+  `user_id`/`error_message` field names.
+- `testing/client.cljc` test harness POSTed to `/rpc` but the HTTP
+  transport routes `/mcp`. One-line fix.
+- Integration test `load-file` paths pointing to non-existent
+  `*/jvm/*.clj` server files now point to the existing `.cljc`
+  versions.
+- `examples/test_servers/prompts_server.cljc` — 26 handlers accessed
+  context via `[:params :arguments :key]` but `handle-prompts-get`
+  already unwraps `:arguments` into `:params`. Changed to
+  `[:params :key]`.
+- DAP `setBreakpoints :verified` coerces backend-type lookup to
+  boolean. Was returning `:nrepl`/`nil` instead of `true`/`false`.
+- `transports/stdio.cljc` `null-output-stream-writer` made public
+  (macro expansion needs it from consumer namespaces).
+- Protocol version assertions updated `"2025-06-18"` → `"2025-11-25"`.
+
+**CLJS portability fixes**
+- `util/edn.cljc` — referenced nonexistent `clojure.reader/read-string`;
+  now uses `edn/read-string`.
+- `util/platform.cljc` `datafy-value` / `nav-value` now use
+  `clojure.core.protocols/Datafiable` uniformly. Both platforms ship
+  this in CLJS 1.10+. The old `cljs.core/IDatafiable` reference was
+  wrong.
+- `inspect.cljc` datafy `extend-type` blocks unified — no more
+  JVM/CLJS split since both use the same protocol.
+- `util/batch.cljc` `pmap-batch` CLJS branch now falls back to
+  sequential since `pmap` doesn't exist.
+- `defport.sugar/start-transport!` / `stop-transport!` made
+  cross-platform (were JVM-only via unnecessary `requiring-resolve`).
+- Catch clauses using reader-conditional type annotations migrated
+  to `platform/try-any` macro.
+
+#### Removed
+
+**~1,600 lines of unused/speculative code**
+- `defport/mcp_client.clj`, `defport/dap_client.clj`, `defport/lsp_client.clj`
+  — the three extracted client modules (zero tests, zero callers).
+- `McpClient` defrecord and 13 `client-*` convenience functions from
+  `defport/mcp.cljc`.
+- `create-server`, `start!`, `stop!`, `create-client` stubs from
+  `defport/core.cljc` (all threw "not yet implemented").
+- `src/defport/schema.cljc` + `test/defport/schema_test.clj` — dead
+  code requiring malli which was removed from `deps.edn` prior to
+  this session.
+
+#### Reader conditional reduction
+
+**225 → 74 (−67%)**, with whole-def structural conditionals dropping
+from 92 → 8 (−91%).
+
+Remaining 74 break down as:
+- ~27 in `defport.util.platform` (the deliberate abstraction layer)
+- ~12 in `ns` form `:require`/`:import` blocks (unavoidable for
+  JVM-only libraries like cheshire, http-kit, clj-http, Java IO)
+- ~11 in `transports/stdio.cljc` and `transports/http.cljc` (two
+  platform implementations coexisting in one file)
+- ~24 mechanical/inline patterns scattered across util files that
+  can be picked up opportunistically
+
+**Core library files now essentially cross-platform:**
+- `defport/mcp.cljc`: 20 → 4 conditionals (−80%)
+- `defport/dap.cljc`: 33 → 1 (−97%)
+- `defport/lsp.cljc`: 19 → 3 (−84%)
+- `src/mcp.cljc` sugar facade: 42 → 1 (−98%)
+- `src/dap.cljc` sugar facade: 27 → 1 (−96%)
+- `src/lsp.cljc` sugar facade: 10 → 1 (−90%)
+
+The critical path (`defport.mcp` + `defport.core` + `defport.registry`
++ `defport.transports.stdio`) compiles clean on Node via ClojureScript.
+A CLJS consumer can build and run an MCP server using only these
+namespaces without any JVM-only code on the required graph.
+
+#### Philosophy, codified
+
+**Defport is to MCP what Ring is to HTTP:** a protocol adapter
+abstraction so thin and opinion-free that every concurrency model
+in the Clojure ecosystem composes through it without friction.
+
+Six non-negotiable rules now live in `CLAUDE.md`:
+1. Synchronous port handler contract
+2. Users bring their own async
+3. Defport is the protocol intersection (not a super-protocol)
+4. Transport manages concurrency, not the dispatcher
+5. Server/client asymmetry — server is universal, client features
+   don't ship
+6. No mechanical reader conditionals (use `platform/*` helpers)
+
+---
+
 ### Added (Phase 6 - Integration & Documentation - December 7, 2025) 📚
 
 **Status:** ✅ **Integration Patterns & Observability Complete**

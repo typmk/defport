@@ -1,40 +1,77 @@
 # defport
 
-**Platform-agnostic, protocol-agnostic library for building protocol servers.**
+**Synchronous, cross-platform, protocol-adapter library for building MCP, LSP, and DAP servers in Clojure/ClojureScript.**
 
-Build MCP, LSP, DAP, and custom protocol servers with a clean, data-driven approach.
+Defport is to MCP what Ring is to HTTP: a thin, opinion-free adapter layer between JSON-RPC-on-the-wire and your handler functions. Build MCP, LSP, and DAP servers on JVM or Node with the same code.
 
 ## Status
 
-**Version:** 0.5.0-SNAPSHOT | **Tests:** 141 tests, 1,027 assertions, 0 failures
+**Tests:** 304 tests, 1,856 assertions, 0 failures
+**MCP spec:** 100% MCP 2025-11-25 compliant
+**Cross-platform:** JVM + Node (CLJS). Core library compiles clean on both.
 
 | Phase | Status | Highlights |
 |-------|--------|------------|
-| Phase 1: Core Infrastructure | ✅ Complete | Ports, Transports, Registries |
-| Phase 2: MCP Protocol | ✅ Complete | 100% MCP 2025-06-18 spec compliance |
-| Phase 3: Advanced Features | ✅ Complete | Malli, Builder API, Elicitation, Completions |
-| Phase 4: Optional Features | ✅ Complete | ImageContent, Roots, Sampling |
-| Phase 5: Performance | ✅ Complete | 5-10x speedup with concurrent batch processing |
-| Phase 6: Integration | ✅ Complete | Integration patterns, tap> observability, datafy/nav |
-| Phase 7: Multi-Protocol | 🔮 Planned | LSP client/proxy, DAP client/proxy |
+| Phase 1: Core Infrastructure | ✅ Complete | Ports, Transports, Registries, four core protocols |
+| Phase 2: MCP Protocol | ✅ Complete | 100% MCP 2025-11-25 spec compliance |
+| Phase 3: Advanced Features | ✅ Complete | Elicitation, Completions, Roots, Sampling, Progress |
+| Phase 4: Performance | ✅ Complete | Concurrent batch processing (4 strategies) |
+| Phase 5: Integration & Docs | ✅ Complete | ARCHITECTURE.md, INTEGRATION.md, tap> observability, datafy/nav |
+| Phase 6: State Refactor | ✅ Complete | Per-adapter instance state (no more global atoms) |
+| Phase 7: Cross-Platform Restructure | ✅ Complete | Scoped to server-adapter role, reader conditionals −67% |
+| Phase 8: LSP/DAP Server Hardening | 🔮 Future | Real end-to-end coverage for LSP/DAP adapters |
 
 ---
 
-## Quick Start (8 lines)
+## Quick Start — JVM
 
 ```clojure
 (ns my-server
-  (:require [defport :as mcp]))
+  (:require [mcp :as m]))
 
-(mcp/deftool greet
+(m/deftool greet
   "Greet a user"
   [name :- :string]
   {:greeting (str "Hello, " name "!")})
 
-(mcp/start! {:name "my-server" :version "1.0.0"})
+(m/run! {:name "my-server" :version "1.0.0"})
 ```
 
-**That's it.** One require, define your tools, run.
+One require, define your tools, run. Works with Claude Desktop, Cursor, and any MCP client.
+
+## Quick Start — Node (CLJS)
+
+Defport's core ships as `.cljc` and compiles clean to Node via shadow-cljs or `cljs.build.api`. Low-level API:
+
+```clojure
+(ns my-server
+  (:require [defport.core :as core]
+            [defport.registry :as reg]
+            [defport.mcp :as mcp]
+            [defport.transports.stdio :as stdio]))
+
+(def registry (reg/create-function-registry))
+
+(core/register-port! registry
+  {:id :greet
+   :description "Greet a user"
+   :input-schema {:type "object"
+                  :properties {:name {:type "string"}}
+                  :required ["name"]}
+   :handler (fn [ctx] {:result {:greeting (str "Hello, " (:name (:params ctx)))}})})
+
+(def adapter (mcp/create-mcp-adapter))
+(def transport (stdio/create-stdio-transport))
+
+(core/transport-start transport
+  (fn [request]
+    (core/protocol-dispatch adapter
+                            (:method request)
+                            (:params request)
+                            {:port-registry registry :request request})))
+```
+
+Handlers are synchronous on both platforms. If a handler returns a Promise on Node, the stdio transport chains `.then` and writes when resolved — synchronous code is the common case, async is opt-in.
 
 ---
 
@@ -44,53 +81,76 @@ Build MCP, LSP, DAP, and custom protocol servers with a clean, data-driven appro
 
 | We Provide | We Do NOT Provide |
 |------------|-------------------|
-| Protocol adapters (MCP, LSP*, DAP*) | Auth middleware |
-| Transport layer (stdio, HTTP) | Metrics collectors |
+| MCP/LSP/DAP protocol adapters | Auth middleware |
+| Transports (stdio, HTTP) | Metrics collectors |
 | Port registry system | HTTP middleware stacks |
-| Observability hooks (tap>, datafy/nav) | Component/Integrant adapters |
+| `Unwrappable` extension point for user async | Component/Integrant adapters |
+| tap> observability hooks | Subprocess clients / external server drivers |
+| datafy/nav for REPL introspection | Framework lifecycle management |
 
-**Why?** You already have auth, metrics, and lifecycle management. Defport integrates with YOUR infrastructure.
+**Why?** You already have auth, metrics, async libraries, and lifecycle management in your application. Defport integrates with YOUR infrastructure. Six design principles (in `CLAUDE.md`) keep it that way.
+
+### The synchronous contract
+
+Port handlers are `(fn [context] result)`. Plain functions. Defport calls them synchronously and wraps the return value as a protocol response. Handlers may optionally return async types that defport unwraps via feature detection:
 
 ```clojure
-;; defport provides the MCP handler
-(def mcp-handler (mcp/create-mcp-handler registry adapter))
+;; Plain value (common case)
+(m/deftool search [query :- :string]
+  (db/query! "SELECT * FROM code WHERE text LIKE ?" [query]))
 
-;; YOU wrap it with YOUR middleware
-(def app
-  (-> mcp-handler
-      (wrap-authentication your-auth-backend)  ; YOUR auth
-      (wrap-metrics your-prometheus-registry)  ; YOUR metrics
-      wrap-json))
+;; Clojure future / promise / delay — unwrapped automatically
+(m/deftool slow-op [input :- :string]
+  (future (expensive-computation input)))
+
+;; Manifold deferred — detected via requiring-resolve, no hard dep
+(m/deftool manifold-style [input :- :string]
+  (d/chain (fetch input) process))
+
+;; core.async channel — supported on JVM via <!!
+(require '[clojure.core.async :as a])
+(m/deftool channel-style [input :- :string]
+  (a/<!! (a/go (a/<! (async-op input)))))
+
+;; js/Promise — supported by the Node stdio transport via .then chaining
+(m/deftool promise-style [url :- :string]
+  (js/fetch url))
 ```
 
-See [docs/INTEGRATION.md](docs/INTEGRATION.md) for Component, Integrant, Ring, and Pedestal patterns.
+**Defport has zero hard dependencies on any async library.** You bring your own.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full concurrency model rationale.
 
 ---
 
 ## Core Concepts
 
-### 1. Port (Capability)
+### Port — a capability
 
-A **Port** represents something your server can do. Protocol-agnostic - same port works via MCP, LSP, or any protocol.
+Protocol-agnostic. The same port can be exposed via MCP tools, LSP commands, or DAP requests.
 
 ```clojure
 {:id :search-code
  :description "Search for code"
  :input-schema {:type "object" :properties {:query {:type "string"}}}
- :handler (fn [{:keys [params]}] {:result (search (:query params))})}
+ :handler (fn [ctx] {:result (search (:params ctx))})}
 ```
 
-### 2. Transport (Message Delivery)
+### Transport — message delivery
 
-**Transports** handle low-level communication: `stdio` for CLI tools, `http` for web services.
+- `stdio` — one process per peer, inherently sequential, works on JVM and Node
+- `http` — long-running daemon, concurrency managed by http-kit (JVM) or Node's event loop
 
-### 3. ProtocolAdapter (Protocol Translation)
+### ProtocolAdapter — JSON-RPC translation
 
-**Adapters** translate protocol messages (MCP, LSP, DAP) to port executions.
+`McpAdapter` maps MCP methods (`tools/call`, `prompts/get`, etc.) to port invocations, handles cancellation, forwards `:metadata`, emits observability events.
 
-### 4. PortRegistry (Port Management)
+### PortRegistry — port management
 
-**Registries** manage your ports. Load from EDN files, register programmatically, or both.
+Three registry types (all implement the same protocol):
+- `FunctionPortRegistry` — register at runtime
+- `EdnPortRegistry` — load declarative port definitions from EDN
+- `HybridPortRegistry` — both
 
 ---
 
@@ -98,7 +158,7 @@ A **Port** represents something your server can do. Protocol-agnostic - same por
 
 ```clojure
 ;; deps.edn
-{:deps {io.github.yourorg/defport {:git/tag "v0.5.0" :git/sha "..."}}}
+{:deps {io.github.typmk/defport {:git/tag "v0.7.0" :git/sha "..."}}}
 ```
 
 ---
@@ -107,68 +167,58 @@ A **Port** represents something your server can do. Protocol-agnostic - same por
 
 | Document | Description |
 |----------|-------------|
-| [INTEGRATION.md](docs/INTEGRATION.md) | Component, Integrant, Ring, auth, metrics patterns |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rationale and philosophy |
-| [PERFORMANCE.md](docs/PERFORMANCE.md) | Batch processing and optimization |
-| [CONCURRENCY.md](docs/CONCURRENCY.md) | Thread safety model |
-| [PROJECT_HISTORY.md](docs/PROJECT_HISTORY.md) | Evolution and design decisions |
-| [ROADMAP.md](ROADMAP.md) | Feature roadmap |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rationale, concurrency model, protocol intersection |
+| [INTEGRATION.md](docs/INTEGRATION.md) | Component, Integrant, Ring, Pedestal, auth, metrics patterns |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Batch processing strategies |
+| [CONCURRENCY.md](docs/CONCURRENCY.md) | Thread safety (JVM) and event loop (Node) |
+| [ROADMAP.md](ROADMAP.md) | Feature roadmap and phase status |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
+| [CLAUDE.md](CLAUDE.md) | Design principles (non-negotiable rules for future work) |
 
 ---
 
 ## Examples
 
-### Progressive Disclosure DSL (Recommended)
+### Progressive disclosure DSL
 
 ```clojure
 (ns my-server
-  (:require [defport :as mcp]))
+  (:require [mcp :as m]))
 
 ;; Simple tool
-(mcp/deftool search-code
+(m/deftool search-code
   "Search for code matching a query"
   [query :- :string]
   [{:file "src/example.clj" :line 42 :code "(defn example [] ...)"}])
 
-;; Tool with Malli schema
-(mcp/deftool create-user
-  "Create a new user"
-  [:map
-   [:name [:string {:min 1 :max 100}]]
-   [:email [:re #".+@.+\..+"]]
-   [:age {:optional true} [:int {:min 0 :max 150}]]]
-  (create-user-in-db params))
-
 ;; Prompt
-(mcp/defprompt explain-function
+(m/defprompt explain-function
   "Generate explanation prompt"
   [function-name :- :string]
-  [{:role "user" :content {:type "text" :text (str "Explain: " function-name)}}])
+  [{:role "user"
+    :content {:type "text" :text (str "Explain: " function-name)}}])
 
 ;; Resource
-(mcp/defresource schema
+(m/defresource schema
   "Database schema"
   {:mime-type "application/edn"}
   (get-current-schema))
 
 ;; Start server
-(mcp/start! {:name "my-server" :version "1.0.0" :transport :stdio})
+(m/run! {:name "my-server" :version "1.0.0" :transport :stdio})
 ```
 
-### Data-Driven API (Full Control)
+### Data-driven API
 
 ```clojure
 (ns my-server
   (:require [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.transports.http :as http]))
 
-;; Create registry
 (def my-registry (registry/create-function-registry))
 
-;; Register port
 (core/register-port! my-registry
   {:id :search-code
    :description "Search for code"
@@ -176,30 +226,30 @@ A **Port** represents something your server can do. Protocol-agnostic - same por
    :handler (fn [context]
               {:result (search (get-in context [:params :query]))})})
 
-;; Create adapter
 (def adapter (mcp/create-mcp-adapter
                {:server-info {:name "my-server" :version "1.0.0"}}))
 
-;; Create transport and start
 (def transport (http/create-http-transport {:port 8080}))
 
 (core/transport-start transport
   (fn [request]
     (core/protocol-dispatch adapter (:method request) (:params request)
-      {:port-registry my-registry :transport transport})))
+                            {:port-registry my-registry :transport transport})))
 ```
 
-### REPL Introspection
+### REPL introspection
 
 ```clojure
 (require '[defport.inspect :as inspect])
 (require '[clojure.datafy :refer [datafy]])
 
-;; Inspect adapter state
 (datafy adapter)
-;; => {:type :mcp-adapter :protocol-version "2025-06-18" :methods [...]}
+;; => {:type :mcp-adapter
+;;     :protocol-version "2025-11-25"
+;;     :methods [...]
+;;     :active-operations 0
+;;     :resource-subscriptions 0}
 
-;; Quick registry summary
 (inspect/registry-summary my-registry)
 ;; => {:port-count 5 :ports [{:id :search-code ...}]}
 ```
@@ -211,29 +261,55 @@ A **Port** represents something your server can do. Protocol-agnostic - same por
 Defport emits tap> events for zero-cost observability:
 
 ```clojure
-;; Development - print all events
+;; Development
 (add-tap println)
 
-;; Production - route to metrics
+;; Production
 (add-tap (fn [e]
            (when (and (map? e) (:event e))
              (case (:event e)
-               :mcp/tool-call (prometheus/inc! :tool-calls {:tool (:tool e)})
-               :mcp/error (prometheus/inc! :errors)
+               :mcp/tool-call         (prometheus/inc! :tool-calls {:tool (:tool e)})
+               :mcp/error             (prometheus/inc! :errors)
+               :mcp/operation-cancelled (prometheus/inc! :cancellations)
                nil))))
 ```
 
-Events: `:mcp/tool-call`, `:mcp/error`, `:mcp/operation-cancelled`, `:mcp/subscription-added`, `:mcp/subscription-removed`
+Events emitted: `:mcp/tool-call`, `:mcp/error`, `:mcp/operation-cancelled`, `:mcp/subscription-added`, `:mcp/subscription-removed`. All include `:timestamp`.
 
 ---
 
-## Platform Support
+## Client mode (not included)
+
+**Defport does not ship a subprocess client** for "my program wants to spawn an MCP server and drive it." That use case — spawning an external process and sending it JSON-RPC requests — belongs in your application, not in a protocol adapter library (the same way `clj-http` is separate from Ring).
+
+If your application needs client-role capability, implement `defport.core/ProtocolClient` using whichever subprocess library fits your stack:
+
+```clojure
+(require '[babashka.process :as p]
+         '[defport.core :as core])
+
+(defrecord MyMcpClient [process in out state]
+  core/ProtocolClient
+  (protocol-connect [this transport client-info] ...)
+  (protocol-request [this method params] ...)
+  (protocol-notify  [this method params] ...)
+  (protocol-disconnect [this] ...)
+  (register-request-handler! [this method handler] ...))
+```
+
+The `ProtocolClient` protocol is defined and documented; implementations are your concern.
+
+---
+
+## Platform support
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| JVM (Clojure) | ✅ Full | All features |
-| Node.js (CLJS) | ✅ Full | Via ClojureScript |
-| Browser (CLJS) | ⚠️ Limited | WebSocket only |
+| JVM (Clojure) | ✅ Full | All server features, all transports, all tests |
+| Node (CLJS) | ✅ Core library | `defport.mcp`, `defport.core`, `defport.registry`, `defport.transports.stdio` compile clean. HTTP transport on Node is experimental. |
+| Browser (CLJS) | ⚠️ Limited | WebSocket only (no stdio, no subprocess spawning) |
+
+**The core server path is truly cross-platform.** A CLJS/Node project can require `defport.mcp` and build an MCP server without any JVM-only code on the required graph.
 
 ---
 
@@ -241,10 +317,14 @@ Events: `:mcp/tool-call`, `:mcp/error`, `:mcp/operation-cancelled`, `:mcp/subscr
 
 | Aspect | Defport Approach |
 |--------|------------------|
-| Philosophy | Library, not framework - you stay in control |
-| Protocols | MCP today, LSP and DAP planned |
-| Auth/Metrics | You provide - integrates with your stack |
-| Ergonomics | Convenience macros without magic |
+| Philosophy | Library, not framework |
+| Protocols | MCP (production), LSP + DAP (exploratory) |
+| Concurrency | Synchronous handlers, users bring their own async |
+| Platform | `.cljc` throughout, honestly cross-platform |
+| Auth/Metrics | You provide |
+| Subprocess clients | You provide |
+
+**20% fewer lines than FastMCP for equivalent server functionality**, with no Python dependency and genuine cross-platform support.
 
 ---
 
@@ -252,15 +332,14 @@ Events: `:mcp/tool-call`, `:mcp/error`, `:mcp/operation-cancelled`, `:mcp/subscr
 
 Contributions welcome:
 
-- Protocol adapters (LSP, DAP)
+- LSP/DAP adapter hardening (real end-to-end tests)
+- CLJS HTTP transport validation
 - Transport implementations (WebSocket, gRPC)
 - Documentation improvements
 - Bug reports
 
+Before contributing, read [CLAUDE.md](CLAUDE.md) — the six design principles there are non-negotiable and apply to all new code.
+
 ## License
 
 EPL 1.0 (Eclipse Public License)
-
----
-
-**Questions?** Open an issue or join #defport on Clojurians Slack.
