@@ -2,7 +2,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [clojure.string :as str]))
 
 (use-fixtures :each
@@ -151,7 +151,7 @@
           registry (registry/create-function-registry)
           context {:port-registry registry}
           result (core/protocol-dispatch adapter "initialize"
-                                          {:protocolVersion "2025-06-18"
+                                          {:protocolVersion "2025-11-25"
                                            :capabilities {}
                                            :clientInfo {:name "test-client" :version "1.0"}}
                                           context)]

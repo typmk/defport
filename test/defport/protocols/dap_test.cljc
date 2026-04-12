@@ -1,7 +1,7 @@
 (ns defport.protocols.dap-test
   "Tests for DAP protocol adapter."
   (:require [clojure.test :refer [deftest testing is are]]
-            [defport.protocols.dap :as dap]
+            [defport.dap :as dap]
             [defport.core :as core]
             [defport.registry :as registry]))
 
@@ -21,10 +21,16 @@
          opts))
 
 (defn dispatch-command
-  "Dispatch a DAP command and return result."
+  "Dispatch a DAP command and return result.
+
+  protocol-dispatch wraps non-success responses in {:result ...}; this helper
+  unwraps that wrapper so tests can access response fields directly."
   [adapter command args & [ctx-opts]]
-  (core/protocol-dispatch adapter command {:arguments args}
-    (create-test-context adapter ctx-opts)))
+  (let [resp (core/protocol-dispatch adapter command {:arguments args}
+               (create-test-context adapter ctx-opts))]
+    (if (and (map? resp) (contains? resp :result) (not (contains? resp :error)))
+      (:result resp)
+      resp)))
 
 ;; ============================================================================
 ;; Adapter Creation Tests

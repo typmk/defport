@@ -3,7 +3,7 @@
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.util.batch :as batch]))
 
 ;; =============================================================================

@@ -5,7 +5,7 @@
   and creating test registries with ports."
   (:require [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.transports.http :as http-transport]
             [defport.transports.stdio :as stdio-transport]
             #?(:clj [clj-http.client :as http-client])))

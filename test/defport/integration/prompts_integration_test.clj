@@ -5,12 +5,12 @@
             [defport.testing.client :as client]
             [defport.testing.compliance :as compliance]
             [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]
             [clojure.string :as str]))
 
 ;; Load the prompts server namespace
-(load-file "examples/test_servers/prompts_server/jvm/prompts_server.clj")
+(load-file "examples/test_servers/prompts_server.cljc")
 
 ;; ============================================================================
 ;; Test Fixtures
@@ -19,7 +19,9 @@
 (def test-registry (atom nil))
 
 (defn setup-registry []
-  (reset! test-registry (test-servers.prompts-server/create-prompts-registry)))
+  (when-let [create-fn (resolve 'test-servers.prompts-server/create-prompts-registry)]
+    (reset! test-registry (create-fn))))
+;; Note: using `resolve` so the test can still compile if the server file is missing.
 
 (use-fixtures :once (fn [f] (setup-registry) (f)))
 (use-fixtures :each (fn [f] (mcp/reset-protocol-state!) (f)))
@@ -45,7 +47,7 @@
                                                    (:_request-id response))))
 
           ;; Verify capabilities
-          (is (= "2025-06-18" (:protocolVersion result)))
+          (is (= "2025-11-25" (:protocolVersion result)))
           (is (true? (get-in result [:capabilities :prompts :listChanged]))))))))
 
 (deftest ^:integration test-prompts-list

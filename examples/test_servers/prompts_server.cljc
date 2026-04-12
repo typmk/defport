@@ -12,7 +12,7 @@
     HTTP:  clojure -M -m test-servers.prompts-server --http 8080
     Stdio: clojure -M -m test-servers.prompts-server --stdio"
   (:require [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]
             [defport.transports.http :as http]
             [defport.transports.stdio :as stdio]
@@ -26,9 +26,9 @@
 (defn code-review-handler
   "Generate a code review prompt for the given code snippet."
   [context]
-  (let [code (get-in context [:params :arguments :code])
-        language (get-in context [:params :arguments :language] "unknown")
-        focus (get-in context [:params :arguments :focus] "general")]
+  (let [code (get-in context [:params :code])
+        language (get-in context [:params :language] "unknown")
+        focus (get-in context [:params :focus] "general")]
     (if (str/blank? code)
       {:error {:code -32602
                :message "Missing required argument: code"}}
@@ -49,8 +49,8 @@
 (defn explain-function-handler
   "Generate a prompt to explain a specific function."
   [context]
-  (let [function-name (get-in context [:params :arguments :function_name])
-        include-examples (get-in context [:params :arguments :include_examples] true)]
+  (let [function-name (get-in context [:params :function_name])
+        include-examples (get-in context [:params :include_examples] true)]
     (if (str/blank? function-name)
       {:error {:code -32602
                :message "Missing required argument: function_name"}}
@@ -68,9 +68,9 @@
 (defn debug-help-handler
   "Generate a debugging assistance prompt."
   [context]
-  (let [error-msg (get-in context [:params :arguments :error_message])
-        stack-trace (get-in context [:params :arguments :stack_trace])
-        context-info (get-in context [:params :arguments :context])]
+  (let [error-msg (get-in context [:params :error_message])
+        stack-trace (get-in context [:params :stack_trace])
+        context-info (get-in context [:params :context])]
     (if (str/blank? error-msg)
       {:error {:code -32602
                :message "Missing required argument: error_message"}}
@@ -91,8 +91,8 @@
 (defn refactor-suggestion-handler
   "Generate refactoring suggestions for code."
   [context]
-  (let [code (get-in context [:params :arguments :code])
-        goal (get-in context [:params :arguments :goal] "improve readability")]
+  (let [code (get-in context [:params :code])
+        goal (get-in context [:params :goal] "improve readability")]
     (if (str/blank? code)
       {:error {:code -32602
                :message "Missing required argument: code"}}
@@ -111,9 +111,9 @@
 (defn write-tests-handler
   "Generate a prompt to write tests for code."
   [context]
-  (let [code (get-in context [:params :arguments :code])
-        framework (get-in context [:params :arguments :framework] "clojure.test")
-        coverage (get-in context [:params :arguments :coverage] "comprehensive")]
+  (let [code (get-in context [:params :code])
+        framework (get-in context [:params :framework] "clojure.test")
+        coverage (get-in context [:params :coverage] "comprehensive")]
     (if (str/blank? code)
       {:error {:code -32602
                :message "Missing required argument: code"}}
@@ -133,9 +133,9 @@
 (defn document-api-handler
   "Generate API documentation prompt."
   [context]
-  (let [api-name (get-in context [:params :arguments :api_name])
-        endpoints (get-in context [:params :arguments :endpoints])
-        format (get-in context [:params :arguments :format] "markdown")]
+  (let [api-name (get-in context [:params :api_name])
+        endpoints (get-in context [:params :endpoints])
+        format (get-in context [:params :format] "markdown")]
     (if (str/blank? api-name)
       {:error {:code -32602
                :message "Missing required argument: api_name"}}
@@ -156,8 +156,8 @@
 (defn optimize-query-handler
   "Generate database query optimization prompt."
   [context]
-  (let [query (get-in context [:params :arguments :query])
-        database (get-in context [:params :arguments :database] "PostgreSQL")]
+  (let [query (get-in context [:params :query])
+        database (get-in context [:params :database] "PostgreSQL")]
     (if (str/blank? query)
       {:error {:code -32602
                :message "Missing required argument: query"}}
@@ -175,9 +175,9 @@
 (defn architecture-review-handler
   "Generate architecture review prompt."
   [context]
-  (let [description (get-in context [:params :arguments :description])
-        scale (get-in context [:params :arguments :scale] "medium")
-        constraints (get-in context [:params :arguments :constraints])]
+  (let [description (get-in context [:params :description])
+        scale (get-in context [:params :scale] "medium")
+        constraints (get-in context [:params :constraints])]
     (if (str/blank? description)
       {:error {:code -32602
                :message "Missing required argument: description"}}
@@ -199,8 +199,8 @@
 (defn security-audit-handler
   "Generate security audit prompt."
   [context]
-  (let [code (get-in context [:params :arguments :code])
-        scope (get-in context [:params :arguments :scope] "full")]
+  (let [code (get-in context [:params :code])
+        scope (get-in context [:params :scope] "full")]
     (if (str/blank? code)
       {:error {:code -32602
                :message "Missing required argument: code"}}
@@ -222,9 +222,9 @@
 (defn onboarding-guide-handler
   "Generate new developer onboarding guide prompt."
   [context]
-  (let [project-name (get-in context [:params :arguments :project_name])
-        tech-stack (get-in context [:params :arguments :tech_stack])
-        team-size (get-in context [:params :arguments :team_size] "small")]
+  (let [project-name (get-in context [:params :project_name])
+        tech-stack (get-in context [:params :tech_stack])
+        team-size (get-in context [:params :team_size] "small")]
     (if (str/blank? project-name)
       {:error {:code -32602
                :message "Missing required argument: project_name"}}

@@ -2,7 +2,7 @@
   "Tests for MCP protocol adapter."
   (:require [clojure.test :refer [deftest testing is]]
             [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]))
 
 ;; ============================================================================
@@ -62,7 +62,7 @@
     (let [adapter (mcp/create-mcp-adapter)]
       (is (satisfies? core/ProtocolAdapter adapter))
       (is (= :mcp (core/protocol-id adapter)))
-      (is (= "2025-06-18" (core/protocol-version adapter)))))
+      (is (= "2025-11-25" (core/protocol-version adapter)))))
 
   (testing "Create MCP adapter with custom server info"
     (let [adapter (mcp/create-mcp-adapter
@@ -94,7 +94,7 @@
 
       (let [caps (core/protocol-capabilities adapter reg)]
         (is (map? (:prompts caps)))
-        (is (= false (:listChanged (:prompts caps)))))))
+        (is (= true (:listChanged (:prompts caps)))))))
 
   (testing "Capabilities with resources"
     (let [adapter (mcp/create-mcp-adapter)
@@ -108,7 +108,7 @@
       (let [caps (core/protocol-capabilities adapter reg)]
         (is (map? (:resources caps)))
         (is (= true (:subscribe (:resources caps))))  ; subscriptions enabled by default
-        (is (= false (:listChanged (:resources caps))))))))
+        (is (= true (:listChanged (:resources caps))))))))
 
 (deftest test-handle-initialize
   (testing "Initialize request returns protocol info"
@@ -117,7 +117,7 @@
           context {:port-registry (create-test-registry)}
           result (core/protocol-dispatch adapter "initialize" {} context)]
 
-      (is (= "2025-06-18" (:protocolVersion result)))
+      (is (= "2025-11-25" (:protocolVersion result)))
       (is (= "test-server" (get-in result [:serverInfo :name])))
       (is (= "1.0.0" (get-in result [:serverInfo :version])))
       (is (map? (:capabilities result)))
@@ -257,7 +257,7 @@
       (is (= -32602 (:code (:error result)))))))
 
 (deftest test-handle-ping
-  (testing "Ping returns empty response per MCP 2025-06-18 spec"
+  (testing "Ping returns empty response per MCP 2025-11-25 spec"
     (let [adapter (mcp/create-mcp-adapter
                     {:server-info {:name "test-server" :version "1.0.0"}})
           context {:port-registry (create-test-registry)}
@@ -277,32 +277,33 @@
 
 (deftest test-cancellation-support
   (testing "Register and cancel operation"
-    (mcp/reset-protocol-state!)
-    (let [call-id "test-call-1"]
-      (mcp/register-operation call-id)
-      (is (false? (mcp/is-cancelled? call-id)))
+    (let [state* (mcp/create-protocol-state)
+          call-id "test-call-1"]
+      (mcp/register-operation state* call-id)
+      (is (false? (mcp/is-cancelled? state* call-id)))
 
-      (mcp/cancel-operation call-id)
-      (is (true? (mcp/is-cancelled? call-id)))
+      (mcp/cancel-operation state* call-id)
+      (is (true? (mcp/is-cancelled? state* call-id)))
 
-      (mcp/unregister-operation call-id)
-      (is (nil? (mcp/is-cancelled? call-id))))))
+      (mcp/unregister-operation state* call-id)
+      ;; After unregister, call-id is removed from both sets
+      (is (false? (mcp/is-cancelled? state* call-id))))))
 
 (deftest test-request-id-validation
   (testing "Validate unique request IDs"
-    (mcp/reset-protocol-state!)
+    (let [state* (mcp/create-protocol-state)]
 
-    ;; Nil is valid (notifications)
-    (is (true? (mcp/validate-request-id nil)))
+      ;; Nil is valid (notifications)
+      (is (true? (mcp/validate-request-id state* nil)))
 
-    ;; First occurrence is valid
-    (is (true? (mcp/validate-request-id "req-1")))
+      ;; First occurrence is valid
+      (is (true? (mcp/validate-request-id state* "req-1")))
 
-    ;; Duplicate is invalid
-    (is (false? (mcp/validate-request-id "req-1")))
+      ;; Duplicate is invalid
+      (is (false? (mcp/validate-request-id state* "req-1")))
 
-    ;; Different ID is valid
-    (is (true? (mcp/validate-request-id "req-2")))))
+      ;; Different ID is valid
+      (is (true? (mcp/validate-request-id state* "req-2"))))))
 
 (deftest test-custom-handlers
   (testing "Register custom handler"
@@ -340,7 +341,7 @@
         (is (vector? (:content result)))
         (is (= 1 (count (:content result))))
         (let [content (first (:content result))]
-          ;; MCP 2025-06-18 spec: ObjectContent doesn't exist
+          ;; MCP 2025-11-25 spec: ObjectContent doesn't exist
           ;; All structured data must use TextContent with JSON serialization
           (is (= "text" (:type content)))
           (is (string? (:text content)))
@@ -460,20 +461,21 @@
                   :refactoring-enabled? true}
           result (core/protocol-dispatch adapter "initialize" {} context)]
 
-      (is (= "2025-06-18" (:protocolVersion result)))
+      (is (= "2025-11-25" (:protocolVersion result)))
       (is (map? (get-in result [:capabilities :refactoring])))
       (is (true? (get-in result [:capabilities :refactoring :enabled]))))))
 
 (deftest test-logging-set-level
   (testing "Sets log level for session"
     (let [adapter (mcp/create-mcp-adapter)
+          state* (mcp/adapter-state adapter)
           context {:port-registry (create-test-registry)
                    :session {:id "test-session"}}
           result (core/protocol-dispatch adapter "logging/setLevel"
                                           {:level "warning"}
                                           context)]
       (is (= {} result))
-      (is (= :warning (mcp/get-session-log-level "test-session")))))
+      (is (= :warning (mcp/get-session-log-level state* "test-session")))))
 
   (testing "Validates log level"
     (let [adapter (mcp/create-mcp-adapter)
@@ -485,32 +487,34 @@
       (is (= -32602 (get-in result [:error :code])))))
 
   (testing "Filters log messages based on level"
-    (let [session-id :test-session]
+    (let [state* (mcp/create-protocol-state)
+          session-id :test-session]
       ;; Set minimum level to warning
-      (mcp/set-session-log-level! session-id :warning)
+      (mcp/set-session-log-level! state* session-id :warning)
 
       ;; debug should be filtered
-      (is (false? (mcp/should-send-log? session-id :debug)))
+      (is (false? (mcp/should-send-log? state* session-id :debug)))
       ;; info should be filtered
-      (is (false? (mcp/should-send-log? session-id :info)))
+      (is (false? (mcp/should-send-log? state* session-id :info)))
       ;; warning should pass
-      (is (true? (mcp/should-send-log? session-id :warning)))
+      (is (true? (mcp/should-send-log? state* session-id :warning)))
       ;; error should pass
-      (is (true? (mcp/should-send-log? session-id :error)))))
+      (is (true? (mcp/should-send-log? state* session-id :error)))))
 
   (testing "Default log level is debug (show all)"
-    (is (= :debug (mcp/get-session-log-level :new-session)))
-    (is (true? (mcp/should-send-log? :new-session :debug)))
-    (is (true? (mcp/should-send-log? :new-session :info)))
-    (is (true? (mcp/should-send-log? :new-session :warning)))
-    (is (true? (mcp/should-send-log? :new-session :error)))))
+    (let [state* (mcp/create-protocol-state)]
+      (is (= :debug (mcp/get-session-log-level state* :new-session)))
+      (is (true? (mcp/should-send-log? state* :new-session :debug)))
+      (is (true? (mcp/should-send-log? state* :new-session :info)))
+      (is (true? (mcp/should-send-log? state* :new-session :warning)))
+      (is (true? (mcp/should-send-log? state* :new-session :error))))))
 
 (deftest test-logging-capability
   (testing "Initialize returns logging capability"
     (let [adapter (mcp/create-mcp-adapter)
           context {:port-registry (create-test-registry)}
           result (core/protocol-dispatch adapter "initialize"
-                                          {:protocolVersion "2025-06-18"
+                                          {:protocolVersion "2025-11-25"
                                            :capabilities {}
                                            :clientInfo {:name "test" :version "1.0"}}
                                           context)]

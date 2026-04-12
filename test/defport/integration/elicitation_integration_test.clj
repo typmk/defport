@@ -2,11 +2,11 @@
   "Integration tests for the elicitation test server.
 
   Tests the complete request/response cycle for all elicitation tools,
-  verifying MCP 2025-06-18 compliance and elicitation functionality."
+  verifying MCP 2025-11-25 compliance and elicitation functionality."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [defport.core :as core]
-   [defport.protocols.mcp :as mcp]
+   [defport.mcp :as mcp]
    [defport.registry :as registry]
    [defport.testing.client :as client]
    [defport.testing.server :as server]
@@ -221,7 +221,7 @@
                                                   (:_request-id response))))
 
           ;; Verify protocol version
-          (is (= "2025-06-18" (get-in response [:result :protocolVersion])))
+          (is (= "2025-11-25" (get-in response [:result :protocolVersion])))
 
           ;; Verify server info
           (is (= "defport-mcp-server" (get-in response [:result :serverInfo :name]))))))))

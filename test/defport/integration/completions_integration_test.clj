@@ -6,7 +6,7 @@
             [defport.testing.compliance :as compliance]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [cheshire.core :as json]
             [clojure.string :as str]))
 
@@ -162,7 +162,7 @@
   (let [base-adapter (mcp/create-mcp-adapter {})]
     (reify core/ProtocolAdapter
       (protocol-id [_] :mcp)
-      (protocol-version [_] "2025-06-18")
+      (protocol-version [_] "2025-11-25")
       (protocol-capabilities [_ port-registry]
         (merge (core/protocol-capabilities base-adapter port-registry)
                {:completion {}}))
@@ -202,7 +202,7 @@
       (client/with-test-client [c :http {:url (server/get-server-url srv)}]
         (let [response (client/client-initialize c {:name "test-client" :version "1.0"})]
           (is (nil? (:error response)) "Initialization should succeed")
-          (is (= "2025-06-18" (get-in response [:result :protocolVersion])))
+          (is (= "2025-11-25" (get-in response [:result :protocolVersion])))
           (let [capabilities (get-in response [:result :capabilities])]
             (is (contains? capabilities :completion) "Should have completion capability")))))))
 
@@ -396,7 +396,7 @@
             (is (nil? (:error response)) "Concurrent requests should succeed")))))))
 
 (deftest ^:integration test-compliance-validation
-  (testing "All responses comply with MCP 2025-06-18 spec"
+  (testing "All responses comply with MCP 2025-11-25 spec"
     (with-completions-test-server [srv {}]
       (client/with-test-client [c :http {:url (server/get-server-url srv)}]
         ;; Initialize

@@ -380,10 +380,12 @@
 ;;            :metadata {...}}}
 (defonce ^:private *registry (atom {}))
 
-(defn register-port!
-  "Register a capability that can be exposed via multiple protocols.
+(defn register-global-port!
+  "Register a capability to the global cross-protocol registry.
 
    This is the core of cross-protocol sharing. Register once, expose everywhere.
+   For registering ports to a specific PortRegistry, use the protocol method:
+     (register-port! registry port-def)
 
    port-def is a map with:
    - :id - Keyword identifier (required)
@@ -393,10 +395,10 @@
    - :metadata - Additional metadata (tags, annotations, etc.)
 
    Example:
-     (register-port! {:id :analyze
-                      :handler analyze-code
-                      :schema [:map [:code :string]]
-                      :description \"Analyze code structure\"})
+     (register-global-port! {:id :analyze
+                             :handler analyze-code
+                             :schema [:map [:code :string]]
+                             :description \"Analyze code structure\"})
 
      ;; Then expose in protocols:
      (mcp/expose-port! :analyze)                    ; as MCP tool

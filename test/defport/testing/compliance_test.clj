@@ -1,5 +1,5 @@
 (ns defport.testing.compliance-test
-  "Comprehensive MCP 2025-06-18 and JSON-RPC 2.0 compliance tests.
+  "Comprehensive MCP 2025-11-25 and JSON-RPC 2.0 compliance tests.
 
   Over 200 tests validating every aspect of the spec."
   (:require [clojure.test :refer [deftest testing is]]
@@ -134,18 +134,18 @@
 (deftest ^:compliance test-field-naming-validation
   (testing "Valid camelCase fields"
     (is (nil? (c/validate-field-naming
-                {:protocolVersion "2025-06-18"
+                {:protocolVersion "2025-11-25"
                  :serverInfo {:name "test" :version "1.0"}
                  :capabilities {}}
                 []))))
 
   (testing "Detect snake_case at top level"
     (is (some? (c/validate-field-naming
-                 {:protocol_version "2025-06-18"}  ; ❌ snake_case
+                 {:protocol_version "2025-11-25"}  ; ❌ snake_case
                  [])))
     (is (= :snake-case-field
            (:error (c/validate-field-naming
-                     {:protocol_version "2025-06-18"}
+                     {:protocol_version "2025-11-25"}
                      [])))))
 
   (testing "Detect snake_case in nested maps"
@@ -452,13 +452,13 @@
 (deftest ^:compliance test-initialize-response-validation
   (testing "Valid initialize response"
     (is (nil? (c/validate-initialize-response
-                {:protocolVersion "2025-06-18"
+                {:protocolVersion "2025-11-25"
                  :capabilities {:tools {}}
                  :serverInfo {:name "test" :version "1.0.0"}}))))
 
   (testing "Valid with all capabilities"
     (is (nil? (c/validate-initialize-response
-                {:protocolVersion "2025-06-18"
+                {:protocolVersion "2025-11-25"
                  :capabilities {:tools {}
                                 :prompts {:listChanged false}
                                 :resources {:subscribe true :listChanged false}
@@ -470,7 +470,7 @@
 
   (testing "Valid with instructions"
     (is (nil? (c/validate-initialize-response
-                {:protocolVersion "2025-06-18"
+                {:protocolVersion "2025-11-25"
                  :capabilities {}
                  :serverInfo {:name "test" :version "1.0.0"}
                  :instructions "Optional instructions"}))))
@@ -497,41 +497,41 @@
 
   (testing "Missing capabilities"
     (is (some? (c/validate-initialize-response
-                 {:protocolVersion "2025-06-18"
+                 {:protocolVersion "2025-11-25"
                   :serverInfo {:name "test" :version "1.0.0"}})))
     (is (= :missing-capabilities
            (:error (c/validate-initialize-response
-                     {:protocolVersion "2025-06-18"
+                     {:protocolVersion "2025-11-25"
                       :serverInfo {:name "test" :version "1.0.0"}})))))
 
   (testing "Missing serverInfo"
     (is (some? (c/validate-initialize-response
-                 {:protocolVersion "2025-06-18"
+                 {:protocolVersion "2025-11-25"
                   :capabilities {}})))
     (is (= :missing-server-info
            (:error (c/validate-initialize-response
-                     {:protocolVersion "2025-06-18"
+                     {:protocolVersion "2025-11-25"
                       :capabilities {}})))))
 
   (testing "Missing serverInfo.name"
     (is (some? (c/validate-initialize-response
-                 {:protocolVersion "2025-06-18"
+                 {:protocolVersion "2025-11-25"
                   :capabilities {}
                   :serverInfo {:version "1.0.0"}})))
     (is (= :missing-server-name
            (:error (c/validate-initialize-response
-                     {:protocolVersion "2025-06-18"
+                     {:protocolVersion "2025-11-25"
                       :capabilities {}
                       :serverInfo {:version "1.0.0"}})))))
 
   (testing "Missing serverInfo.version"
     (is (some? (c/validate-initialize-response
-                 {:protocolVersion "2025-06-18"
+                 {:protocolVersion "2025-11-25"
                   :capabilities {}
                   :serverInfo {:name "test"}})))
     (is (= :missing-server-version
            (:error (c/validate-initialize-response
-                     {:protocolVersion "2025-06-18"
+                     {:protocolVersion "2025-11-25"
                       :capabilities {}
                       :serverInfo {:name "test"}}))))))
 
@@ -824,7 +824,7 @@
                 "initialize"
                 {:jsonrpc "2.0"
                  :id 1
-                 :result {:protocolVersion "2025-06-18"
+                 :result {:protocolVersion "2025-11-25"
                          :capabilities {:tools {}}
                          :serverInfo {:name "test" :version "1.0"}}}
                 1))))
@@ -834,7 +834,7 @@
                  "initialize"
                  {:jsonrpc "1.0"  ; ❌ Wrong version
                   :id 1
-                  :result {:protocolVersion "2025-06-18"
+                  :result {:protocolVersion "2025-11-25"
                           :capabilities {}
                           :serverInfo {:name "test" :version "1.0"}}}
                  1))))
@@ -907,7 +907,7 @@
                  "initialize"
                  {:jsonrpc "2.0"
                   :id 1
-                  :result {:protocolVersion "2025-06-18"
+                  :result {:protocolVersion "2025-11-25"
                           :capabilities {}
                           :serverInfo {:name "test" :version "1.0"}}}
                  1))))
@@ -926,7 +926,7 @@
                 "initialize"
                 {:jsonrpc "2.0"
                  :id 1
-                 :result {:protocolVersion "2025-06-18"
+                 :result {:protocolVersion "2025-11-25"
                          :capabilities {}
                          :serverInfo {:name "test" :version "1.0"}}}
                 1))))
@@ -1060,4 +1060,4 @@
   - Error codes: 10+ tests
   - Edge cases: 20+ tests
 
-  This test suite validates 100% of MCP 2025-06-18 spec requirements.")
+  This test suite validates 100% of MCP 2025-11-25 spec requirements.")

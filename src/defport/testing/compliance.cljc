@@ -103,14 +103,23 @@
   (and (string? s)
        (str/includes? s "_")))
 
+(def ^:private user-data-keys
+  "Map keys whose values are user-defined content (JSON Schema, user arguments,
+  tool results, etc.) and should NOT be recursively validated for MCP camelCase.
+  MCP only mandates camelCase for its own protocol fields."
+  #{:inputSchema :outputSchema :requestedSchema :schema :arguments
+    :content :contents :metadata :_meta})
+
 (defn validate-field-naming
   "Validate that all keys in map use camelCase, not snake_case.
 
-  Recursively validates nested maps and arrays."
+  Recursively validates nested maps and arrays, but skips values under
+  `user-data-keys` since those are user-defined content where snake_case
+  is legitimate (JSON Schema properties, tool arguments, etc.)."
   [data path]
   (cond
     (map? data)
-    (or (some (fn [[k v]]
+    (or (some (fn [[k _]]
                 (let [key-name (name k)]
                   (when (snake-case? key-name)
                     {:error :snake-case-field
@@ -119,7 +128,8 @@
                      :value key-name})))
               data)
         (some (fn [[k v]]
-                (validate-field-naming v (conj path k)))
+                (when-not (contains? user-data-keys k)
+                  (validate-field-naming v (conj path k))))
               data))
 
     (sequential? data)

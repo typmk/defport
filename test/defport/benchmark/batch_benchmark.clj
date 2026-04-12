@@ -6,7 +6,7 @@
             [defport.util.batch :as batch]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]))
+            [defport.mcp :as mcp]))
 
 ;; =============================================================================
 ;; Benchmark Configuration

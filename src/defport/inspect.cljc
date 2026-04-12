@@ -12,7 +12,7 @@
     (p/datafy-value mcp-adapter)
     ;; => {:type :mcp-adapter
     ;;     :protocol-id :mcp
-    ;;     :protocol-version \"2025-06-18\"
+    ;;     :protocol-version \"2025-11-25\"
     ;;     :server-info {:name \"my-server\" :version \"1.0.0\"}
     ;;     :capabilities {...}
     ;;     :method-handlers [...]}
@@ -24,7 +24,7 @@
   Cross-platform: Works on both JVM (Clojure) and ClojureScript."
   (:require [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.util.platform :as platform]
             #?(:clj [clojure.core.protocols :as p])))
 
@@ -171,63 +171,63 @@
 ;; ============================================================================
 
 #?(:clj
-   (extend-type defport.protocols.mcp.McpAdapter
+   (extend-type defport.mcp.McpAdapter
      p/Datafiable
      (datafy [adapter]
        (let [handlers @(:method-handlers* adapter)
-             opts (:adapter-opts adapter)]
+             opts (:adapter-opts adapter)
+             state @(:state* adapter)]
          (with-meta
            {:type :mcp-adapter
             :protocol-id :mcp
-            :protocol-version "2025-06-18"
+            :protocol-version "2025-11-25"
             :server-info (:server-info adapter)
             :refactoring-enabled? (:refactoring-enabled? opts)
             :subscriptions-enabled? (:enable-subscriptions? opts)
             :uri-scheme (:uri-scheme opts)
             :method-count (count handlers)
             :methods (vec (sort (keys handlers)))
-            ;; Protocol state snapshot
-            :active-operations (count @mcp/active-operations*)
-            :resource-subscriptions (count @mcp/resource-subscriptions*)
-            :elicitations (count @mcp/elicitation-state*)
-            :sampling-requests (count @mcp/sampling-state*)}
+            ;; Protocol state snapshot from instance
+            :active-operations (count (:active-operations state))
+            :resource-subscriptions (count (:resource-subscriptions state))
+            :elicitations (count (:elicitation state))
+            :sampling-requests (count (:sampling state))}
            {`p/nav (fn [_data k _v]
                      (case k
                        :method-handlers handlers
                        :adapter-opts opts
                        :performance (:performance opts)
-                       :active-operations-map @mcp/active-operations*
-                       :subscriptions-map @mcp/resource-subscriptions*
+                       :state state
                        nil))}))))
 
    :cljs
-   (extend-type defport.protocols.mcp.McpAdapter
+   (extend-type defport.mcp.McpAdapter
      IDatafiable
      (-datafy [adapter]
        (let [handlers @(:method-handlers* adapter)
-             opts (:adapter-opts adapter)]
+             opts (:adapter-opts adapter)
+             state @(:state* adapter)]
          (with-meta
            {:type :mcp-adapter
             :protocol-id :mcp
-            :protocol-version "2025-06-18"
+            :protocol-version "2025-11-25"
             :server-info (:server-info adapter)
             :refactoring-enabled? (:refactoring-enabled? opts)
             :subscriptions-enabled? (:enable-subscriptions? opts)
             :uri-scheme (:uri-scheme opts)
             :method-count (count handlers)
             :methods (vec (sort (keys handlers)))
-            ;; Protocol state snapshot
-            :active-operations (count @mcp/active-operations*)
-            :resource-subscriptions (count @mcp/resource-subscriptions*)
-            :elicitations (count @mcp/elicitation-state*)
-            :sampling-requests (count @mcp/sampling-state*)}
+            ;; Protocol state snapshot from instance
+            :active-operations (count (:active-operations state))
+            :resource-subscriptions (count (:resource-subscriptions state))
+            :elicitations (count (:elicitation state))
+            :sampling-requests (count (:sampling state))}
            {'cljs.core/-nav (fn [_data k _v]
                               (case k
                                 :method-handlers handlers
                                 :adapter-opts opts
                                 :performance (:performance opts)
-                                :active-operations-map @mcp/active-operations*
-                                :subscriptions-map @mcp/resource-subscriptions*
+                                :state state
                                 nil))})))))
 
 ;; ============================================================================
@@ -263,10 +263,11 @@
 
   Useful for debugging connection issues."
   [adapter]
-  {:server-info (:server-info adapter)
-   :methods (vec (sort (keys @(:method-handlers* adapter))))
-   :state {:active-operations (count @mcp/active-operations*)
-           :subscriptions (count @mcp/resource-subscriptions*)
-           :pending-elicitations (count @mcp/elicitation-state*)
-           :pending-sampling (count @mcp/sampling-state*)
-           :seen-request-ids (count @mcp/seen-request-ids*)}})
+  (let [state @(:state* adapter)]
+    {:server-info (:server-info adapter)
+     :methods (vec (sort (keys @(:method-handlers* adapter))))
+     :state {:active-operations (count (:active-operations state))
+             :subscriptions (count (:resource-subscriptions state))
+             :pending-elicitations (count (:elicitation state))
+             :pending-sampling (count (:sampling state))
+             :seen-request-ids (count (:seen-request-ids state))}}))

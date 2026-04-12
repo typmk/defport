@@ -4,7 +4,7 @@
             [defport.testing.client :as client]
             [defport.testing.server :as server]
             [defport.testing.compliance :as compliance]
-            [defport.protocols.mcp :as mcp]))
+            [defport.mcp :as mcp]))
 
 ;; ============================================================================
 ;; Test Fixtures
@@ -38,7 +38,7 @@
             (is (nil? (compliance/validate-initialize-response (:result response))))
 
             ;; Verify protocol version
-            (is (= "2025-06-18" (get-in response [:result :protocolVersion])))
+            (is (= "2025-11-25" (get-in response [:result :protocolVersion])))
 
             ;; Verify server info
             (is (map? (get-in response [:result :serverInfo])))

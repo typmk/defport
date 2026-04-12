@@ -6,7 +6,7 @@
             [defport.testing.compliance :as compliance]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [cheshire.core :as json]
             [clojure.string :as str]))
 
@@ -260,8 +260,8 @@
       (client/with-test-client [c :http {:url (server/get-server-url srv)}]
         (let [response (client/client-initialize c {:name "test-client" :version "1.0"})]
           (is (nil? (:error response)) "Initialization should succeed")
-          (is (= "2025-06-18" (get-in response [:result :protocolVersion]))
-              "Should report MCP 2025-06-18")
+          (is (= "2025-11-25" (get-in response [:result :protocolVersion]))
+              "Should report MCP 2025-11-25")
 
           ;; Check roots capability (if supported by adapter)
           (let [capabilities (get-in response [:result :capabilities])]
@@ -521,7 +521,7 @@
                 "All validations should be classified")))))))
 
 (deftest ^:integration test-compliance-validation
-  (testing "All responses comply with MCP 2025-06-18 spec"
+  (testing "All responses comply with MCP 2025-11-25 spec"
     (with-roots-test-server [srv {:transport :http}]
       (client/with-test-client [c :http {:url (server/get-server-url srv)}]
         ;; Initialize

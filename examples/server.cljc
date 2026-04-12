@@ -7,7 +7,7 @@
     node target/server.js --http 8080"
   (:require [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.transports.stdio :as stdio]
             [defport.transports.http :as http]
             [defport.util.batch :as batch]
@@ -106,7 +106,7 @@
             :details  (when (:include-details params)
                         {:by-namespace
                          {"defport.core"          {:lines 500  :functions 20}
-                          "defport.protocols.mcp" {:lines 2000 :functions 50}}})}})
+                          "defport.mcp" {:lines 2000 :functions 50}}})}})
 
 (defn list-files-handler
   "List files within roots."

@@ -5,12 +5,12 @@
             [defport.testing.client :as client]
             [defport.testing.compliance :as compliance]
             [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]
             [clojure.string :as str]))
 
 ;; Load the sampling server namespace
-(load-file "examples/test_servers/sampling_server/jvm/sampling_server.clj")
+(load-file "examples/test_servers/sampling_server.cljc")
 
 ;; ============================================================================
 ;; Test Fixtures
@@ -19,7 +19,8 @@
 (def test-registry (atom nil))
 
 (defn setup-registry []
-  (reset! test-registry (test-servers.sampling-server/create-sampling-registry)))
+  (when-let [create-fn (resolve 'test-servers.sampling-server/create-sampling-registry)]
+    (reset! test-registry (create-fn))))
 
 (use-fixtures :once (fn [f] (setup-registry) (f)))
 (use-fixtures :each (fn [f] (mcp/reset-protocol-state!) (f)))
@@ -45,7 +46,7 @@
                                                    (:_request-id response))))
 
           ;; Verify protocol version
-          (is (= "2025-06-18" (:protocolVersion result))))))))
+          (is (= "2025-11-25" (:protocolVersion result))))))))
 
 (deftest ^:integration test-sampling-tools-list
   (testing "List all sampling tools"

@@ -19,7 +19,7 @@
     node out/tools_server.js --http 8080
     node out/tools_server.js --stdio"
   (:require [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]
             [defport.transports.http :as http-transport]
             [defport.transports.stdio :as stdio-transport]

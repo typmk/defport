@@ -454,7 +454,7 @@
     ;; In REPL mode, breakpoints are not verified
     {:breakpoints (mapv (fn [bp]
                           (cond-> {:id (hash [path (:line bp)])
-                                   :verified (#{:nrepl :jdi :flowstorm} backend-type)
+                                   :verified (boolean (#{:nrepl :jdi :flowstorm} backend-type))
                                    :line (:line bp)}
                             (:column bp) (assoc :column (:column bp))))
                         breakpoints)}))

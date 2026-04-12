@@ -7,7 +7,7 @@
   (:require [criterium.core :as crit]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [cheshire.core :as json]))
 
 ;; =============================================================================

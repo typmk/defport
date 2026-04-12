@@ -13,7 +13,7 @@
     HTTP:  clojure -M -m test-servers.resources-server --http 8080
     Stdio: clojure -M -m test-servers.resources-server --stdio"
   (:require [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]
             [defport.transports.http :as http]
             [defport.transports.stdio :as stdio]

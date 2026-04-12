@@ -3,7 +3,7 @@
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
             [defport.testing.server :as server]
             [defport.testing.client :as client]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.core :as core]))
 
 ;; ============================================================================
@@ -227,7 +227,7 @@
           ;; Initialize
           (let [response (client/client-initialize c {:name "test" :version "1.0"})]
             (is (nil? (:error response)))
-            (is (= "2025-06-18" (get-in response [:result :protocolVersion]))))
+            (is (= "2025-11-25" (get-in response [:result :protocolVersion]))))
 
           ;; List tools
           (let [response (client/client-list-tools c)]

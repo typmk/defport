@@ -90,42 +90,59 @@
                            "false")))
 
 ;; ============================================================================
-;; Protocol State Management
+;; Protocol State — single atom, immutable map
 ;; ============================================================================
 
-(defonce seen-request-ids* (atom #{}))
-(defonce active-operations* (atom {}))
-(defonce resource-subscriptions* (atom {}))
-(defonce change-notifications-enabled* (atom {:tools false :prompts false :resources false}))
-(defonce elicitation-state* (atom {}))
-(defonce session-log-levels* (atom {}))
-(defonce client-roots* (atom []))
-(defonce sampling-state* (atom {}))
+(def ^:private empty-state
+  "The shape of a fresh protocol state."
+  {:seen-request-ids    #{}
+   :active-operations   #{}
+   :cancelled-operations #{}
+   :resource-subscriptions {}
+   :change-notifications {:tools false :prompts false :resources false}
+   :elicitation         {}
+   :session-log-levels  {}
+   :client-roots        []
+   :sampling            {}})
+
+(defn create-protocol-state
+  "Create a fresh protocol state atom.
+
+  Each McpAdapter owns one. Returns a single atom holding an immutable map.
+  All mutations go through swap! on this one atom — no nested atoms, consistent
+  snapshots, trivial to inspect or reset."
+  []
+  (atom empty-state))
+
+;; Default state for backward compatibility with code that calls
+;; reset-protocol-state! without an adapter reference.
+(defonce default-state* (create-protocol-state))
 
 (defn reset-protocol-state!
-  "Reset protocol state (for testing or reconnection).
-  Clears all tracked request IDs, active operations, and subscriptions."
-  []
-  (reset! seen-request-ids* #{})
-  (reset! active-operations* {})
-  (reset! resource-subscriptions* {})
-  (reset! change-notifications-enabled* {:tools false :prompts false :resources false})
-  (reset! elicitation-state* {})
-  (reset! session-log-levels* {})
-  (reset! client-roots* [])
-  (reset! sampling-state* {}))
+  "Reset protocol state. Accepts an optional state atom (defaults to the
+  global default-state* for backward compatibility)."
+  ([]
+   (reset-protocol-state! default-state*))
+  ([state*]
+   (reset! state* empty-state)))
+
+(defn adapter-state
+  "Get the protocol state atom from an adapter. Useful for tests and introspection."
+  [adapter]
+  (:state* adapter))
+
+;; ============================================================================
+;; Request ID Validation
+;; ============================================================================
 
 (defn validate-request-id
   "Validate that a request ID is unique within the session.
   Returns true if valid (or nil for notifications), false if duplicate."
-  [request-id]
+  [state* request-id]
   (if (nil? request-id)
-    true  ; Notifications don't have IDs
-    (if (contains? @seen-request-ids* request-id)
-      false  ; Duplicate
-      (do
-        (swap! seen-request-ids* conj request-id)
-        true))))
+    true
+    (let [[old _] (swap-vals! state* update :seen-request-ids conj request-id)]
+      (not (contains? (:seen-request-ids old) request-id)))))
 
 ;; ============================================================================
 ;; Operation Cancellation Support
@@ -134,26 +151,27 @@
 (defn register-operation
   "Register an operation for cancellation tracking.
   Returns the call-id for chaining."
-  [call-id]
-  (swap! active-operations* assoc call-id (atom false))
+  [state* call-id]
+  (swap! state* update :active-operations conj call-id)
   call-id)
 
 (defn cancel-operation
   "Mark an operation as cancelled."
-  [call-id]
-  (when-let [cancelled-flag (get @active-operations* call-id)]
-    (reset! cancelled-flag true)))
+  [state* call-id]
+  (swap! state* update :cancelled-operations conj call-id))
 
 (defn is-cancelled?
   "Check if an operation is cancelled."
-  [call-id]
-  (when-let [cancelled-flag (get @active-operations* call-id)]
-    @cancelled-flag))
+  [state* call-id]
+  (contains? (:cancelled-operations @state*) call-id))
 
 (defn unregister-operation
   "Unregister an operation when complete."
-  [call-id]
-  (swap! active-operations* dissoc call-id))
+  [state* call-id]
+  (swap! state* (fn [s]
+                  (-> s
+                      (update :active-operations disj call-id)
+                      (update :cancelled-operations disj call-id)))))
 
 ;; ============================================================================
 ;; Resource Subscription Support
@@ -162,38 +180,37 @@
 (defn subscribe-to-resource
   "Subscribe to resource updates.
   Returns subscription ID for tracking."
-  [uri]
-  (let [sub-id (proto-util/generate-call-id)
-        subscribers (get @resource-subscriptions* uri #{})]
-    (swap! resource-subscriptions* assoc uri (conj subscribers sub-id))
+  [state* uri]
+  (let [sub-id (proto-util/generate-call-id)]
+    (swap! state* update-in [:resource-subscriptions uri] (fnil conj #{}) sub-id)
     sub-id))
 
 (defn unsubscribe-from-resource
   "Unsubscribe from resource updates."
-  [uri sub-id]
-  (let [subscribers (get @resource-subscriptions* uri #{})]
-    (swap! resource-subscriptions* assoc uri (disj subscribers sub-id))
-    ;; Clean up empty subscription sets
-    (when (empty? (get @resource-subscriptions* uri))
-      (swap! resource-subscriptions* dissoc uri))))
+  [state* uri sub-id]
+  (swap! state* (fn [s]
+                  (let [subs (disj (get-in s [:resource-subscriptions uri] #{}) sub-id)]
+                    (if (empty? subs)
+                      (update s :resource-subscriptions dissoc uri)
+                      (assoc-in s [:resource-subscriptions uri] subs))))))
 
 (defn get-resource-subscribers
   "Get all subscriber IDs for a resource URI."
-  [uri]
-  (get @resource-subscriptions* uri #{}))
+  [state* uri]
+  (get-in @state* [:resource-subscriptions uri] #{}))
 
 (defn notify-resource-updated
   "Send resource updated notification to all subscribers.
 
+  state* - Protocol state atom
   transport - Transport instance for sending notifications
   uri - Resource URI that was updated
 
   Sends notifications/resources/updated to all subscribers via transport."
-  [transport uri]
+  [state* transport uri]
   (when transport
-    (let [subscribers (get-resource-subscribers uri)]
+    (let [subscribers (get-resource-subscribers state* uri)]
       (when (seq subscribers)
-        ;; Send notification through transport
         (core/transport-send transport
           {:jsonrpc "2.0"
            :method "notifications/resources/updated"
@@ -211,6 +228,7 @@
   - URL mode: Out-of-band interactions via external URLs (OAuth, credentials)
 
   Args:
+    state* - Protocol state atom
     message - Message to present to user
     opts - Options map (optional for backward compat with form mode):
       :mode - :form (default) or :url
@@ -220,31 +238,29 @@
 
   Returns elicitation ID for tracking.
 
-  Note: This is a synchronous operation from the tool's perspective but
-  asynchronous at the protocol level. The tool should block waiting for
-  elicit-response! to be called by the client's response handler.
-
   Examples:
     ;; Form mode (backward compatible)
-    (create-elicitation \"Enter your name\" {:schema {:type \"object\" :properties {:name {:type \"string\"}}}})
+    (create-elicitation state* \"Enter your name\" {:schema {:type \"object\" :properties {:name {:type \"string\"}}}})
 
     ;; URL mode (new in 2025-11-25)
-    (create-elicitation \"Please authorize\" {:mode :url :url \"https://example.com/oauth\"})"
-  ([message]
-   (create-elicitation message nil))
-  ([message opts]
+    (create-elicitation state* \"Please authorize\" {:mode :url :url \"https://example.com/oauth\"})"
+  ([state* message]
+   (create-elicitation state* message nil))
+  ([state* message opts]
    (let [;; Handle backward compat: if opts is a map with :type, it's a schema
          opts (if (and (map? opts) (:type opts))
                 {:mode :form :schema opts}
                 opts)
          elicit-id (or (:elicitation-id opts) (proto-util/generate-call-id))
          mode (or (:mode opts) :form)
+         ;; Promise atom for async delivery — stored as a value inside the
+         ;; immutable map. This is the one place a nested ref is warranted:
+         ;; it's a one-shot delivery mechanism, not shared mutable state.
          promise-atom (atom nil)]
-     (swap! elicitation-state* assoc elicit-id
+     (swap! state* assoc-in [:elicitation elicit-id]
             (cond-> {:message message
                      :mode mode
-                     :timestamp #?(:clj (System/currentTimeMillis)
-                                  :cljs (.now js/Date))
+                     :timestamp (current-timestamp)
                      :promise promise-atom}
               (= mode :form) (assoc :schema (:schema opts))
               (= mode :url) (assoc :url (:url opts))))
@@ -252,22 +268,23 @@
 
 (defn get-elicitation
   "Get elicitation state by ID."
-  [elicit-id]
-  (get @elicitation-state* elicit-id))
+  [state* elicit-id]
+  (get-in @state* [:elicitation elicit-id]))
 
 (defn elicit-response!
   "Record the client's response to an elicitation request.
 
   Args:
+    state* - Protocol state atom
     elicit-id - Elicitation ID
     action - :accept, :decline, or :cancel
     content - Form data if accepted
 
   This should be called by the handler that receives the client's response."
-  [elicit-id action content]
-  (when-let [elicitation (get @elicitation-state* elicit-id)]
+  [state* elicit-id action content]
+  (when-let [elicitation (get-in @state* [:elicitation elicit-id])]
     (let [response {:action action :content content}]
-      (swap! elicitation-state* update elicit-id assoc
+      (swap! state* update-in [:elicitation elicit-id] assoc
              :action action
              :content content
              :completed true)
@@ -280,21 +297,20 @@
   "Block waiting for elicitation response (for use in tool handlers).
 
   Args:
+    state* - Protocol state atom
     elicit-id - Elicitation ID
     timeout-ms - Maximum time to wait (default 60000ms = 1 minute)
 
   Returns response map with :action and :content, or nil if timeout."
-  [elicit-id & [timeout-ms]]
+  [state* elicit-id & [timeout-ms]]
   (let [timeout (or timeout-ms 60000)
-        start-time #?(:clj (System/currentTimeMillis)
-                     :cljs (.now js/Date))
-        elicitation (get @elicitation-state* elicit-id)
+        start-time (current-timestamp)
+        elicitation (get-in @state* [:elicitation elicit-id])
         promise-atom (:promise elicitation)]
     (loop []
       (if-let [response @promise-atom]
         response
-        (let [elapsed #?(:clj (- (System/currentTimeMillis) start-time)
-                        :cljs (- (.now js/Date) start-time))]
+        (let [elapsed (- (current-timestamp) start-time)]
           (if (> elapsed timeout)
             nil  ; Timeout
             (do
@@ -304,8 +320,8 @@
 
 (defn cancel-elicitation
   "Cancel an elicitation request."
-  [elicit-id]
-  (swap! elicitation-state* dissoc elicit-id))
+  [state* elicit-id]
+  (swap! state* update :elicitation dissoc elicit-id))
 
 (defn notify-elicitation-complete
   "Send elicitation completion notification (for URL mode).
@@ -341,30 +357,32 @@
   "Set minimum log level for a session.
 
   Args:
+    state* - Protocol state atom
     session-id - Session identifier (string or keyword)
     level - Minimum log level (:debug, :info, :warning, :error)
 
   Messages below this level will not be sent to the client."
-  [session-id level]
-  (swap! session-log-levels* assoc session-id level))
+  [state* session-id level]
+  (swap! state* assoc-in [:session-log-levels session-id] level))
 
 (defn get-session-log-level
   "Get minimum log level for a session.
 
   Returns the configured level or :debug (show all) if not set."
-  [session-id]
-  (get @session-log-levels* session-id :debug))
+  [state* session-id]
+  (get-in @state* [:session-log-levels session-id] :debug))
 
 (defn should-send-log?
   "Check if a log message should be sent based on session's minimum level.
 
   Args:
+    state* - Protocol state atom
     session-id - Session identifier
     level - Log level of the message
 
   Returns true if message level >= session minimum level."
-  [session-id level]
-  (let [min-level (get-session-log-level session-id)
+  [state* session-id level]
+  (let [min-level (get-session-log-level state* session-id)
         level-value (get log-level-order level 0)
         min-level-value (get log-level-order min-level 0)]
     (>= level-value min-level-value)))
@@ -372,6 +390,7 @@
 (defn send-log-message
   "Send a log message notification to the client (with level filtering).
 
+  state* - Protocol state atom
   transport - Transport instance for sending notifications
   level - Log level (:debug, :info, :warning, :error)
   message - Log message string
@@ -379,9 +398,9 @@
   session-id - Optional session ID for filtering (defaults to :default)
 
   Sends notifications/message to client via transport if level >= session minimum."
-  [transport level message & {:keys [data session-id]
-                               :or {session-id :default}}]
-  (when (and transport (should-send-log? session-id level))
+  [state* transport level message & {:keys [data session-id]
+                                      :or {session-id :default}}]
+  (when (and transport (should-send-log? state* session-id level))
     (core/transport-send transport
       {:jsonrpc "2.0"
        :method "notifications/message"
@@ -402,15 +421,15 @@
 
   Returns:
     {:roots [{:uri \"file:///workspace\" :name \"Project Root\"}]}"
-  [_params _context]
-  {:roots @client-roots*})
+  [state* _params _context]
+  {:roots (:client-roots @state*)})
 
 (defn update-client-roots!
   "Update the list of client roots (called when client notifies us).
 
   Called when client sends notifications/roots/list_changed."
-  [new-roots]
-  (reset! client-roots* new-roots))
+  [state* new-roots]
+  (swap! state* assoc :client-roots new-roots))
 
 (defn get-roots
   "Get the current list of client roots.
@@ -418,19 +437,19 @@
   Returns vector of root maps with :uri and :name keys.
 
   Example:
-    (get-roots)
+    (get-roots state*)
     ;; => [{:uri \"file:///workspace\" :name \"Project\"}]"
-  []
-  @client-roots*)
+  [state*]
+  (:client-roots @state*))
 
 (defn is-path-in-roots?
   "Check if a file path is within any client root.
 
   Example:
-    (is-path-in-roots? \"/workspace/src/foo.clj\")
+    (is-path-in-roots? state* \"/workspace/src/foo.clj\")
     ;; => true if /workspace is a root"
-  [file-path]
-  (let [roots @client-roots*]
+  [state* file-path]
+  (let [roots (:client-roots @state*)]
     (boolean
       (some (fn [root]
               (let [root-uri (:uri root)
@@ -445,12 +464,12 @@
   "Validate that file access is within allowed roots.
 
   Throws exception if file is outside roots."
-  [file-path]
-  (when-not (is-path-in-roots? file-path)
+  [state* file-path]
+  (when-not (is-path-in-roots? state* file-path)
     (throw (ex-info "File access denied: outside allowed roots"
                     {:code -32603
                      :file-path file-path
-                     :roots @client-roots*}))))
+                     :roots (:client-roots @state*)}))))
 
 ;; ============================================================================
 ;; Sampling Support (MCP 2025-11-25)
@@ -460,6 +479,7 @@
   "Create a sampling request to send to client.
 
   Args:
+    state* - Protocol state atom
     messages - Conversation messages (vector of maps with :role and :content)
     opts - Options map with:
       :model-preferences - Optional model hints
@@ -472,7 +492,7 @@
     Sampling request ID (for tracking response)
 
   Example with tools (2025-11-25):
-    (create-sampling-request
+    (create-sampling-request state*
       [{:role \"user\" :content {:type \"text\" :text \"What's the weather?\"}}]
       {:tools [{:name \"get_weather\"
                 :description \"Get current weather\"
@@ -480,7 +500,7 @@
                               :properties {:city {:type \"string\"}}
                               :required [\"city\"]}}]
        :tool-choice {:mode \"auto\"}})"
-  [messages & [opts]]
+  [state* messages & [opts]]
   (let [request-id (proto-util/generate-call-id)
         request (cond-> {:messages messages
                          :maxTokens (or (:max-tokens opts) 1000)}
@@ -497,21 +517,18 @@
                   (:tool-choice opts)
                   (assoc :toolChoice (:tool-choice opts)))]
 
-    ;; Store request
-    (swap! sampling-state* assoc request-id
-      {:request request
-       :status :pending
-       :timestamp #?(:clj (System/currentTimeMillis)
-                    :cljs (.now js/Date))})
-
+    (swap! state* assoc-in [:sampling request-id]
+           {:request request
+            :status :pending
+            :timestamp (current-timestamp)})
     request-id))
 
 (defn send-sampling-request
   "Send sampling request to client via transport.
 
   Returns promise that resolves when client responds."
-  [transport request-id]
-  (let [request (get-in @sampling-state* [request-id :request])]
+  [state* transport request-id]
+  (let [request (get-in @state* [:sampling request-id :request])]
     ;; Send to client
     (core/transport-send transport
       {:jsonrpc "2.0"
@@ -521,30 +538,30 @@
 
     ;; Create and store promise
     #?(:clj (let [p (promise)]
-              (swap! sampling-state* assoc-in [request-id :promise] p)
+              (swap! state* assoc-in [:sampling request-id :promise] p)
               p)
        :cljs (let [resolve-fn (atom nil)
                    p (js/Promise.
                        (fn [resolve _reject]
                          (reset! resolve-fn resolve)))]
-               (swap! sampling-state* assoc-in [request-id :promise] @resolve-fn)
+               (swap! state* assoc-in [:sampling request-id :promise] @resolve-fn)
                p))))
 
 (defn handle-sampling-response
   "Handle client's response to sampling request.
 
   Called when client returns LLM completion."
-  [request-id response]
-  (when-let [state (get @sampling-state* request-id)]
+  [state* request-id response]
+  (when-let [entry (get-in @state* [:sampling request-id])]
     ;; Update state
-    (swap! sampling-state* update request-id assoc
+    (swap! state* update-in [:sampling request-id] assoc
       :status :completed
       :response response)
 
     ;; Resolve promise
-    #?(:clj (when-let [p (:promise state)]
+    #?(:clj (when-let [p (:promise entry)]
               (deliver p response))
-       :cljs (when-let [resolve (:promise state)]
+       :cljs (when-let [resolve (:promise entry)]
                 (resolve response)))
 
     response))
@@ -553,27 +570,26 @@
   "Block waiting for sampling response (for use in tool handlers).
 
   Args:
+    state* - Protocol state atom
     request-id - Sampling request ID
     timeout-ms - Maximum time to wait (default 60000ms = 1 minute)
 
   Returns response map, or nil if timeout."
-  [request-id & [timeout-ms]]
+  [state* request-id & [timeout-ms]]
   (let [timeout (or timeout-ms 60000)
-        start-time #?(:clj (System/currentTimeMillis)
-                     :cljs (.now js/Date))]
+        start-time (current-timestamp)]
     #?(:clj
-       (let [p (get-in @sampling-state* [request-id :promise])]
+       (let [p (get-in @state* [:sampling request-id :promise])]
          (if p
            (deref p timeout nil)
            nil))
        :cljs
        (loop []
-         (let [state (get @sampling-state* request-id)
-               elapsed #?(:clj (- (System/currentTimeMillis) start-time)
-                         :cljs (- (.now js/Date) start-time))]
+         (let [entry (get-in @state* [:sampling request-id])
+               elapsed (- (current-timestamp) start-time)]
            (cond
-             (= :completed (:status state))
-             (:response state)
+             (= :completed (:status entry))
+             (:response entry)
 
              (> elapsed timeout)
              nil
@@ -585,8 +601,8 @@
 
 (defn cancel-sampling-request
   "Cancel a sampling request."
-  [request-id]
-  (swap! sampling-state* dissoc request-id))
+  [state* request-id]
+  (swap! state* update :sampling dissoc request-id))
 
 ;; ============================================================================
 ;; Change Notification Support
@@ -596,22 +612,23 @@
   "Enable change notifications for a capability type.
 
   type - :tools, :prompts, or :resources"
-  [type]
-  (swap! change-notifications-enabled* assoc type true))
+  [state* type]
+  (swap! state* assoc-in [:change-notifications type] true))
 
 (defn change-notifications-enabled?
   "Check if change notifications are enabled for a type."
-  [type]
-  (get @change-notifications-enabled* type false))
+  [state* type]
+  (get-in @state* [:change-notifications type] false))
 
 (defn notify-tools-list-changed
   "Send tools/list_changed notification to client.
 
+  state* - Protocol state atom
   transport - Transport instance for sending notifications
 
   Applications should call this when tools are added/removed/updated."
-  [transport]
-  (when (and transport (change-notifications-enabled? :tools))
+  [state* transport]
+  (when (and transport (change-notifications-enabled? state* :tools))
     (core/transport-send transport
       {:jsonrpc "2.0"
        :method "notifications/tools/list_changed"})))
@@ -619,11 +636,12 @@
 (defn notify-prompts-list-changed
   "Send prompts/list_changed notification to client.
 
+  state* - Protocol state atom
   transport - Transport instance for sending notifications
 
   Applications should call this when prompts are added/removed/updated."
-  [transport]
-  (when (and transport (change-notifications-enabled? :prompts))
+  [state* transport]
+  (when (and transport (change-notifications-enabled? state* :prompts))
     (core/transport-send transport
       {:jsonrpc "2.0"
        :method "notifications/prompts/list_changed"})))
@@ -631,11 +649,12 @@
 (defn notify-resources-list-changed
   "Send resources/list_changed notification to client.
 
+  state* - Protocol state atom
   transport - Transport instance for sending notifications
 
   Applications should call this when resources are added/removed/updated."
-  [transport]
-  (when (and transport (change-notifications-enabled? :resources))
+  [state* transport]
+  (when (and transport (change-notifications-enabled? state* :resources))
     (core/transport-send transport
       {:jsonrpc "2.0"
        :method "notifications/resources/list_changed"})))
@@ -671,15 +690,15 @@
     ;; => [{:type \"image\" :data \"base64...\" :mimeType \"image/png\"}]"
   [result]
   (cond
-    ;; Image content (has :type \"image\")
+    ;; Image content (has :type "image")
     (content/valid-image-content? result)
     [result]
 
-    ;; Audio content (has :type \"audio\")
+    ;; Audio content (has :type "audio")
     (content/valid-audio-content? result)
     [result]
 
-    ;; Text content (has :type \"text\")
+    ;; Text content (has :type "text")
     (content/valid-text-content? result)
     [result]
 
@@ -699,10 +718,10 @@
   (let [subscriptions-enabled? (get context :enable-subscriptions? true)]
     {:protocolVersion "2025-11-25"
      :serverInfo (or server-info {:name "defport-mcp-server" :version "0.1.0"})
-     :capabilities (cond-> {:tools {}
-                            :prompts {:listChanged false}
+     :capabilities (cond-> {:tools {:listChanged true}
+                            :prompts {:listChanged true}
                             :resources {:subscribe subscriptions-enabled?
-                                       :listChanged false}
+                                       :listChanged true}
                             :roots {:listChanged false}
                             ;; MCP 2025-11-25: sampling with tools support
                             :sampling {:tools {}}
@@ -759,7 +778,8 @@
   "Handle tools/call request with progress and cancellation support.
   Emits tap> events: :mcp/tool-call, :mcp/operation-cancelled, :mcp/error"
   [params context]
-  (let [tool-name (:name params)
+  (let [state* (:state* context)
+        tool-name (:name params)
         tool-params (:arguments params {})
         registry (:port-registry context)
         call-id (proto-util/generate-call-id)
@@ -783,10 +803,10 @@
             {:error {:code -32602 :message (str "Unknown tool: " tool-name)}})
 
           (try
-            (register-operation call-id)
+            (register-operation state* call-id)
 
             ;; Check if cancelled before starting
-            (if (is-cancelled? call-id)
+            (if (is-cancelled? state* call-id)
               (do
                 (emit-event! :mcp/operation-cancelled {:tool tool-name :call-id call-id})
                 {:error {:code -32800 :message "Operation was cancelled"}})
@@ -798,7 +818,7 @@
                                          (:transport context)))
 
                     ;; Create cancellation check
-                    cancellation-check (fn [] (is-cancelled? call-id))
+                    cancellation-check (fn [] (is-cancelled? state* call-id))
 
                     ;; Build execution context
                     exec-context (assoc context
@@ -813,7 +833,7 @@
                     duration-ms (- (current-timestamp) start-time)]
 
                 ;; Check if cancelled during execution
-                (if (is-cancelled? call-id)
+                (if (is-cancelled? state* call-id)
                   (do
                     (emit-event! :mcp/operation-cancelled {:tool tool-name
                                                           :call-id call-id
@@ -837,9 +857,11 @@
                                                    :success? true
                                                    :duration-ms duration-ms})
                       ;; MCP expects content array (TextContent, ImageContent, or AudioContent)
-                      ;; Use format-content to serialize structured data as TextContent with JSON
-                      {:content (or (:content result)
-                                    (format-content (:result result)))})))))
+                      ;; Use format-content to serialize structured data as TextContent with JSON.
+                      ;; Forward :metadata if the handler provided it (e.g., sampling requests).
+                      (cond-> {:content (or (:content result)
+                                            (format-content (:result result)))}
+                        (:metadata result) (assoc :metadata (:metadata result))))))))
 
             (catch #?(:clj Exception :cljs js/Error) e
               (let [duration-ms (- (current-timestamp) start-time)
@@ -854,17 +876,18 @@
                          :message (str "Internal error: " error-msg)}}))
 
             (finally
-              (unregister-operation call-id))))))))
+              (unregister-operation state* call-id))))))))
 
 (defn handle-tools-call-cancel
   "Handle tools/call/cancel request."
-  [params _context]
-  (let [call-id (:callId params)]
+  [params context]
+  (let [state* (:state* context)
+        call-id (:callId params)]
     (if (nil? call-id)
       {:error {:code -32602 :message "Invalid params: missing callId"}}
-      (if (contains? @active-operations* call-id)
+      (if (contains? (:active-operations @state*) call-id)
         (do
-          (cancel-operation call-id)
+          (cancel-operation state* call-id)
           {})  ; Success
         {:error {:code -32602 :message (str "Operation not found: " call-id)}}))))
 
@@ -1001,11 +1024,12 @@
 (defn handle-resources-subscribe
   "Handle resources/subscribe request.
   Emits tap> event: :mcp/subscription-added"
-  [params _context]
-  (let [uri (:uri params)]
+  [params context]
+  (let [state* (:state* context)
+        uri (:uri params)]
     (if (nil? uri)
       {:error {:code -32602 :message "Invalid params: missing resource URI"}}
-      (let [sub-id (subscribe-to-resource uri)]
+      (let [sub-id (subscribe-to-resource state* uri)]
         (emit-event! :mcp/subscription-added {:uri uri :subscription-id sub-id})
         {}))))  ; Success - empty result
 
@@ -1013,13 +1037,14 @@
   "Handle resources/unsubscribe request.
   Emits tap> event: :mcp/subscription-removed"
   [params context]
-  (let [uri (:uri params)
+  (let [state* (:state* context)
+        uri (:uri params)
         sub-id (get-in context [:metadata :subscription-id])]  ; Apps track this
     (if (nil? uri)
       {:error {:code -32602 :message "Invalid params: missing resource URI"}}
       (do
         (emit-event! :mcp/subscription-removed {:uri uri :subscription-id sub-id})
-        (unsubscribe-from-resource uri sub-id)
+        (unsubscribe-from-resource state* uri sub-id)
         {}))))  ; Success - empty result
 
 (defn handle-elicitation-create
@@ -1051,7 +1076,8 @@
 
   Note: The actual response comes later via client's separate call."
   [params context]
-  (let [mode (keyword (or (:mode params) "form"))
+  (let [state* (:state* context)
+        mode (keyword (or (:mode params) "form"))
         message (:message params)
         schema (:requestedSchema params)
         url (:url params)
@@ -1070,7 +1096,7 @@
       {:error {:code -32602 :message "Invalid params: url required for URL mode"}}
 
       :else
-      (let [elicit-id (create-elicitation message
+      (let [elicit-id (create-elicitation state* message
                         (cond-> {:mode mode}
                           (= mode :form) (assoc :schema schema)
                           (= mode :url) (assoc :url url)
@@ -1087,13 +1113,14 @@
 
   Returns empty result on success."
   [params context]
-  (let [elicit-id (:elicitationId params)
+  (let [state* (:state* context)
+        elicit-id (:elicitationId params)
         action (keyword (:action params))
         content (:content params)]
     (if (nil? elicit-id)
       {:error {:code -32602 :message "Invalid params: elicitationId required"}}
       (do
-        (elicit-response! elicit-id action content)
+        (elicit-response! state* elicit-id action content)
         {}))))
 
 (defn handle-elicitation-cancel
@@ -1104,11 +1131,12 @@
 
   Returns empty result on success."
   [params context]
-  (let [elicit-id (:elicitationId params)]
+  (let [state* (:state* context)
+        elicit-id (:elicitationId params)]
     (if (nil? elicit-id)
       {:error {:code -32602 :message "Invalid params: elicitationId required"}}
       (do
-        (cancel-elicitation elicit-id)
+        (cancel-elicitation state* elicit-id)
         {}))))
 
 (defn handle-completion-complete
@@ -1177,12 +1205,13 @@
 
   Returns empty result on success."
   [params context]
-  (let [level-str (:level params)
+  (let [state* (:state* context)
+        level-str (:level params)
         level (when level-str (keyword level-str))
         session-id (or (get-in context [:session :id]) :default)]
     (if (and level (contains? log-level-order level))
       (do
-        (set-session-log-level! session-id level)
+        (set-session-log-level! state* session-id level)
         {})
       {:error {:code -32602
                :message (str "Invalid params: level must be one of debug, info, warning, error")}})))
@@ -1199,7 +1228,7 @@
 ;; MCP Protocol Adapter Implementation
 ;; ============================================================================
 
-(defrecord McpAdapter [server-info method-handlers* adapter-opts]
+(defrecord McpAdapter [server-info method-handlers* adapter-opts state*]
   core/ProtocolAdapter
 
   (protocol-id [_]
@@ -1214,11 +1243,11 @@
           has-resources? (some #(get-in % [:metadata :resource]) ports)
           refactoring-enabled? (:refactoring-enabled? adapter-opts)
           subscriptions-enabled? (get adapter-opts :enable-subscriptions? true)]
-      (cond-> {:tools {}
-               :prompts (when has-prompts? {:listChanged false})
+      (cond-> {:tools {:listChanged true}
+               :prompts (when has-prompts? {:listChanged true})
                :resources (when has-resources?
                            {:subscribe subscriptions-enabled?
-                            :listChanged false})
+                            :listChanged true})
                :roots {:listChanged false}
                ;; MCP 2025-11-25: sampling with tools support
                :sampling {:tools {}}
@@ -1232,13 +1261,14 @@
   (protocol-dispatch [this method params context]
     (let [handlers @method-handlers*
           handler (get handlers method)
-          ;; Enrich context with adapter options
-          enriched-context (merge context adapter-opts)]
+          ;; Enrich context with adapter options AND instance state
+          enriched-context (assoc (merge context adapter-opts)
+                                 :state* state*)]
       (if handler
         (try
           ;; Validate request ID if present
           (when-let [request-id (:id (:request enriched-context))]
-            (when-not (validate-request-id request-id)
+            (when-not (validate-request-id state* request-id)
               (throw (ex-info "Duplicate request ID"
                               {:code -32600
                                :message "Invalid Request: duplicate request ID"}))))
@@ -1269,6 +1299,8 @@
   - :tool-filter - Custom filter fn (fn [ports] -> filtered-ports) to override default filtering
   - :uri-scheme - Custom URI scheme for resources (default: \"defport\")
                   Example: \"defnet\" produces URIs like \"defnet://resource-id\"
+  - :state* - Optional externally-provided protocol state atom (for shared state scenarios).
+              If omitted, a fresh state is created per adapter (recommended).
   - :performance - Performance configuration map with:
     - :batch-processing - Batch processing options:
       - :enabled - Enable concurrent batch processing (default: false)
@@ -1290,7 +1322,7 @@
   Returns McpAdapter instance implementing ProtocolAdapter protocol.
 
   Examples:
-    ;; Default (safe mode - dangerous tools filtered)
+    ;; Default (safe mode - dangerous tools filtered, own state)
     (def adapter (create-mcp-adapter))
 
     ;; Enable refactoring via options
@@ -1356,6 +1388,9 @@
                       :performance performance
                       :uri-scheme uri-scheme}
 
+         ;; Per-adapter protocol state — no global sharing
+         state* (or (:state* opts) (create-protocol-state))
+
          ;; Default method handlers
          default-handlers {"initialize" #(handle-initialize %1 %2 server-info)
                           "tools/list" handle-tools-list
@@ -1368,7 +1403,7 @@
                           "resources/subscribe" handle-resources-subscribe
                           "resources/unsubscribe" handle-resources-unsubscribe
                           "resources/templates/list" (fn [_params _context] {:resourceTemplates []})  ; MCP Inspector extension
-                          "roots/list" handle-roots-list
+                          "roots/list" (fn [params ctx] (handle-roots-list state* params ctx))
                           "elicitation/create" handle-elicitation-create
                           "elicitation/submit" handle-elicitation-submit
                           "elicitation/cancel" handle-elicitation-cancel
@@ -1379,7 +1414,7 @@
          ;; Merge custom handlers
          method-handlers (merge default-handlers custom-handlers)]
 
-     (->McpAdapter server-info (atom method-handlers) adapter-opts))))
+     (->McpAdapter server-info (atom method-handlers) adapter-opts state*))))
 
 (defn register-custom-handler!
   "Register or override a custom method handler.
@@ -1436,41 +1471,50 @@
 ;; MCP Client Implementation (ProtocolClient)
 ;; ============================================================================
 
-(defonce ^:private client-request-id* (atom 0))
-(defonce ^:private client-pending-requests* (atom {}))
-(defonce ^:private client-request-handlers* (atom {}))
+(def ^:private empty-client-state
+  "The shape of fresh client state."
+  {:request-id 0
+   :pending-requests {}
+   :request-handlers {}})
 
-(defn- generate-client-request-id
-  "Generate unique request ID for client requests."
+(defn create-client-state
+  "Create a fresh client state atom. Each McpClient owns one."
   []
-  (swap! client-request-id* inc))
+  (atom empty-client-state))
 
 (defn reset-client-state!
   "Reset client state (for testing or reconnection)."
-  []
-  (reset! client-request-id* 0)
-  (reset! client-pending-requests* {})
-  (reset! client-request-handlers* {}))
+  ([]
+   ;; No-op for backward compat — clients own their state now
+   nil)
+  ([client-state*]
+   (reset! client-state* empty-client-state)))
+
+(defn- generate-client-request-id
+  "Generate unique request ID for client requests."
+  [client-state*]
+  (-> (swap! client-state* update :request-id inc)
+      :request-id))
 
 (defn- handle-client-incoming-message
   "Handle incoming message for client (responses or server-initiated requests).
 
   For responses: Deliver to pending request promise.
   For requests: Dispatch to registered handler."
-  [message]
+  [client-state* message]
   (let [id (:id message)
         method (:method message)]
     (cond
       ;; Response to our request (has id, no method)
       (and id (not method))
-      (when-let [pending (get @client-pending-requests* id)]
+      (when-let [pending (get-in @client-state* [:pending-requests id])]
         (let [promise-atom (:promise pending)]
           (reset! promise-atom message)
-          (swap! client-pending-requests* dissoc id)))
+          (swap! client-state* update :pending-requests dissoc id)))
 
       ;; Server-initiated request (has method)
       method
-      (if-let [handler (get @client-request-handlers* method)]
+      (if-let [handler (get-in @client-state* [:request-handlers method])]
         (try
           (let [result (handler (:params message) {})]
             ;; Return response if request (has id)
@@ -1496,7 +1540,7 @@
       ;; Notification (no id, has method) - already handled above
       :else nil)))
 
-(defrecord McpClient [transport* client-info* server-info* capabilities* connected?* opts]
+(defrecord McpClient [transport* client-info* server-info* capabilities* connected?* client-state* opts]
   core/ProtocolClient
 
   (protocol-connect [this transport client-info]
@@ -1509,10 +1553,10 @@
         (let [parsed (if (string? message)
                        (json/parse-string message true)
                        message)]
-          (handle-client-incoming-message parsed))))
+          (handle-client-incoming-message client-state* parsed))))
 
     ;; Send initialize request
-    (let [request-id (generate-client-request-id)
+    (let [request-id (generate-client-request-id client-state*)
           capabilities (or (:capabilities opts)
                           {:sampling {:tools {}}
                            :roots {:listChanged false}
@@ -1526,7 +1570,7 @@
           promise-atom (atom nil)]
 
       ;; Register pending request
-      (swap! client-pending-requests* assoc request-id
+      (swap! client-state* assoc-in [:pending-requests request-id]
              {:promise promise-atom
               :method "initialize"
               :timestamp (current-timestamp)})
@@ -1563,7 +1607,7 @@
     (when-not @connected?*
       (throw (ex-info "Client not connected" {:method method})))
 
-    (let [request-id (generate-client-request-id)
+    (let [request-id (generate-client-request-id client-state*)
           request {:jsonrpc "2.0"
                    :id request-id
                    :method method
@@ -1571,7 +1615,7 @@
           promise-atom (atom nil)]
 
       ;; Register pending request
-      (swap! client-pending-requests* assoc request-id
+      (swap! client-state* assoc-in [:pending-requests request-id]
              {:promise promise-atom
               :method method
               :timestamp (current-timestamp)})
@@ -1591,7 +1635,7 @@
             (let [elapsed (- (current-timestamp) start-time)]
               (if (> elapsed timeout-ms)
                 (do
-                  (swap! client-pending-requests* dissoc request-id)
+                  (swap! client-state* update :pending-requests dissoc request-id)
                   {:error {:code -32000 :message "Request timeout"}})
                 (do
                   #?(:clj (Thread/sleep 10)
@@ -1619,7 +1663,7 @@
     nil)
 
   (register-request-handler! [this method handler]
-    (swap! client-request-handlers* assoc method handler)
+    (swap! client-state* assoc-in [:request-handlers method] handler)
     nil))
 
 (defn create-mcp-client
@@ -1655,6 +1699,7 @@
                              (atom nil)      ; server-info*
                              (atom nil)      ; capabilities*
                              (atom false)    ; connected?*
+                             (create-client-state)  ; client-state*
                              opts)]
      ;; Register any provided handlers
      (doseq [[method handler] (:handlers opts)]

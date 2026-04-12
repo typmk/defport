@@ -44,7 +44,7 @@
                         :method method
                         :params (or params {})}
            response (http-client/post
-                     (str (:base-url client) "/rpc")
+                     (str (:base-url client) "/mcp")
                      {:body (json/generate-string request-body)
                       :content-type :json
                       :socket-timeout (:timeout-ms client)

@@ -2,20 +2,16 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]))
-
-(use-fixtures :each
-  (fn [f]
-    (mcp/reset-protocol-state!)
-    (f)))
+            [defport.mcp :as mcp]))
 
 (deftest test-elicitation-creation
   (testing "Creates elicitation with message and schema"
-    (let [message "Please provide input"
+    (let [state* (mcp/create-protocol-state)
+          message "Please provide input"
           schema {:type "object" :properties {:name {:type "string"}}}
-          elicit-id (mcp/create-elicitation message schema)]
+          elicit-id (mcp/create-elicitation state* message schema)]
       (is (string? elicit-id))
-      (let [elicitation (mcp/get-elicitation elicit-id)]
+      (let [elicitation (mcp/get-elicitation state* elicit-id)]
         (is (some? elicitation))
         (is (= message (:message elicitation)))
         (is (= schema (:schema elicitation)))
@@ -24,25 +20,28 @@
 
 (deftest test-elicitation-response
   (testing "Records client response"
-    (let [elicit-id (mcp/create-elicitation "Test" {})
-          response (mcp/elicit-response! elicit-id :accept {:value "test"})]
+    (let [state* (mcp/create-protocol-state)
+          elicit-id (mcp/create-elicitation state* "Test" {})
+          response (mcp/elicit-response! state* elicit-id :accept {:value "test"})]
       (is (= :accept (:action response)))
       (is (= {:value "test"} (:content response)))
-      (let [updated (mcp/get-elicitation elicit-id)]
+      (let [updated (mcp/get-elicitation state* elicit-id)]
         (is (true? (:completed updated)))
         (is (= :accept (:action updated)))
         (is (= {:value "test"} (:content updated)))))))
 
 (deftest test-elicitation-cancellation
   (testing "Cancels elicitation"
-    (let [elicit-id (mcp/create-elicitation "Test" {})]
-      (is (some? (mcp/get-elicitation elicit-id)))
-      (mcp/cancel-elicitation elicit-id)
-      (is (nil? (mcp/get-elicitation elicit-id))))))
+    (let [state* (mcp/create-protocol-state)
+          elicit-id (mcp/create-elicitation state* "Test" {})]
+      (is (some? (mcp/get-elicitation state* elicit-id)))
+      (mcp/cancel-elicitation state* elicit-id)
+      (is (nil? (mcp/get-elicitation state* elicit-id))))))
 
 (deftest test-handle-elicitation-create
   (testing "Handles elicitation/create request"
     (let [adapter (mcp/create-mcp-adapter)
+          state* (mcp/adapter-state adapter)
           registry (registry/create-function-registry)
           params {:message "Please confirm"
                   :requestedSchema {:type "object"
@@ -51,7 +50,7 @@
           result (core/protocol-dispatch adapter "elicitation/create" params context)]
       (is (contains? result :elicitationId))
       (is (string? (:elicitationId result)))
-      (is (some? (mcp/get-elicitation (:elicitationId result))))))
+      (is (some? (mcp/get-elicitation state* (:elicitationId result))))))
 
   (testing "Validates required params"
     (let [adapter (mcp/create-mcp-adapter)
@@ -73,17 +72,18 @@
 (deftest test-handle-elicitation-submit
   (testing "Handles elicitation/submit request"
     (let [adapter (mcp/create-mcp-adapter)
+          state* (mcp/adapter-state adapter)
           registry (registry/create-function-registry)
           context {:port-registry registry}
-          ;; Create elicitation first
-          elicit-id (mcp/create-elicitation "Test" {})
+          ;; Create elicitation via adapter's state
+          elicit-id (mcp/create-elicitation state* "Test" {})
           ;; Submit response
           params {:elicitationId elicit-id
                   :action "accept"
                   :content {:value "response"}}
           result (core/protocol-dispatch adapter "elicitation/submit" params context)]
       (is (= {} result))  ; Empty result on success
-      (let [elicitation (mcp/get-elicitation elicit-id)]
+      (let [elicitation (mcp/get-elicitation state* elicit-id)]
         (is (= :accept (:action elicitation)))
         (is (= {:value "response"} (:content elicitation))))))
 
@@ -100,15 +100,16 @@
 (deftest test-handle-elicitation-cancel
   (testing "Handles elicitation/cancel request"
     (let [adapter (mcp/create-mcp-adapter)
+          state* (mcp/adapter-state adapter)
           registry (registry/create-function-registry)
           context {:port-registry registry}
-          ;; Create elicitation first
-          elicit-id (mcp/create-elicitation "Test" {})
+          ;; Create elicitation via adapter's state
+          elicit-id (mcp/create-elicitation state* "Test" {})
           ;; Cancel it
           params {:elicitationId elicit-id}
           result (core/protocol-dispatch adapter "elicitation/cancel" params context)]
       (is (= {} result))  ; Empty result on success
-      (is (nil? (mcp/get-elicitation elicit-id)))))  ; Should be removed
+      (is (nil? (mcp/get-elicitation state* elicit-id)))))  ; Should be removed
 
   (testing "Validates elicitationId"
     (let [adapter (mcp/create-mcp-adapter)
@@ -124,7 +125,7 @@
           registry (registry/create-function-registry)
           context {:port-registry registry}
           result (core/protocol-dispatch adapter "initialize"
-                                          {:protocolVersion "2025-06-18"
+                                          {:protocolVersion "2025-11-25"
                                            :capabilities {}
                                            :clientInfo {:name "test-client" :version "1.0"}}
                                           context)]
@@ -134,36 +135,40 @@
 
 (deftest test-wait-for-elicitation
   (testing "Waits for response with promise delivery"
-    (let [elicit-id (mcp/create-elicitation "Test" {})
+    (let [state* (mcp/create-protocol-state)
+          elicit-id (mcp/create-elicitation state* "Test" {})
           ;; Simulate async response after 100ms
           _ (future
               (Thread/sleep 100)
-              (mcp/elicit-response! elicit-id :accept {:result "ok"}))
+              (mcp/elicit-response! state* elicit-id :accept {:result "ok"}))
           ;; Wait for response
-          response (mcp/wait-for-elicitation elicit-id 1000)]
+          response (mcp/wait-for-elicitation state* elicit-id 1000)]
       (is (some? response))
       (is (= :accept (:action response)))
       (is (= {:result "ok"} (:content response)))))
 
   (testing "Returns nil on timeout"
-    (let [elicit-id (mcp/create-elicitation "Test" {})
+    (let [state* (mcp/create-protocol-state)
+          elicit-id (mcp/create-elicitation state* "Test" {})
           ;; Wait with very short timeout
-          response (mcp/wait-for-elicitation elicit-id 50)]
+          response (mcp/wait-for-elicitation state* elicit-id 50)]
       (is (nil? response)))))
 
 (deftest test-multiple-elicitations
   (testing "Can handle multiple concurrent elicitations"
-    (let [elicit-id-1 (mcp/create-elicitation "First" {})
-          elicit-id-2 (mcp/create-elicitation "Second" {})]
+    (let [state* (mcp/create-protocol-state)
+          elicit-id-1 (mcp/create-elicitation state* "First" {})
+          elicit-id-2 (mcp/create-elicitation state* "Second" {})]
       (is (not= elicit-id-1 elicit-id-2))
-      (mcp/elicit-response! elicit-id-1 :accept {:data 1})
-      (mcp/elicit-response! elicit-id-2 :decline {})
-      (is (= :accept (:action (mcp/get-elicitation elicit-id-1))))
-      (is (= :decline (:action (mcp/get-elicitation elicit-id-2)))))))
+      (mcp/elicit-response! state* elicit-id-1 :accept {:data 1})
+      (mcp/elicit-response! state* elicit-id-2 :decline {})
+      (is (= :accept (:action (mcp/get-elicitation state* elicit-id-1))))
+      (is (= :decline (:action (mcp/get-elicitation state* elicit-id-2)))))))
 
 (deftest test-elicitation-state-reset
   (testing "Reset clears elicitation state"
-    (let [elicit-id (mcp/create-elicitation "Test" {})]
-      (is (some? (mcp/get-elicitation elicit-id)))
-      (mcp/reset-protocol-state!)
-      (is (nil? (mcp/get-elicitation elicit-id))))))
+    (let [state* (mcp/create-protocol-state)
+          elicit-id (mcp/create-elicitation state* "Test" {})]
+      (is (some? (mcp/get-elicitation state* elicit-id)))
+      (mcp/reset-protocol-state! state*)
+      (is (nil? (mcp/get-elicitation state* elicit-id))))))

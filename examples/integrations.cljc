@@ -2,7 +2,7 @@
   "Framework integration patterns - Component, Reitit, Mount, Integrant."
   (:require [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.transports.http :as http]))
 
 ;; ============================================================================

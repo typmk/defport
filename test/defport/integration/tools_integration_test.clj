@@ -6,7 +6,7 @@
             [defport.testing.compliance :as compliance]
             [defport.core :as core]
             [defport.registry :as registry]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [cheshire.core :as json]))
 
 ;; ============================================================================
@@ -227,7 +227,7 @@
           (is (nil? (validate-compliance "initialize" response)))
 
           ;; Verify response structure
-          (is (= "2025-06-18" (:protocolVersion result)))
+          (is (= "2025-11-25" (:protocolVersion result)))
           (is (map? (:capabilities result)))
           (is (map? (:serverInfo result)))
           (is (string? (:name (:serverInfo result))))

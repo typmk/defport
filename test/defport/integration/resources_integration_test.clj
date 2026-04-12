@@ -5,7 +5,7 @@
             [defport.testing.client :as client]
             [defport.testing.compliance :as compliance]
             [defport.core :as core]
-            [defport.protocols.mcp :as mcp]
+            [defport.mcp :as mcp]
             [defport.registry :as registry]
             [cheshire.core :as json]
             [clojure.string :as str]))
@@ -20,7 +20,8 @@
 (def test-registry (atom nil))
 
 (defn setup-registry []
-  (reset! test-registry (test-servers.resources-server/create-resources-registry)))
+  (when-let [create-fn (resolve 'test-servers.resources-server/create-resources-registry)]
+    (reset! test-registry (create-fn))))
 
 (use-fixtures :once (fn [f] (setup-registry) (f)))
 (use-fixtures :each (fn [f] (mcp/reset-protocol-state!) (f)))
@@ -46,7 +47,7 @@
                                                    (:_request-id response))))
 
           ;; Verify capabilities
-          (is (= "2025-06-18" (:protocolVersion result)))
+          (is (= "2025-11-25" (:protocolVersion result)))
           (is (true? (get-in result [:capabilities :resources :subscribe])))
           (is (true? (get-in result [:capabilities :resources :listChanged]))))))))
 

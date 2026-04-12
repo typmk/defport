@@ -30,8 +30,9 @@
 
 #?(:clj
    (do
-     ;; Null output stream for discarding stdout
-     (def ^:private null-output-stream-writer
+     ;; Null output stream for discarding stdout.
+     ;; Public because it's referenced from macro expansions in consumer namespaces.
+     (def null-output-stream-writer
        (java.io.OutputStreamWriter.
          (proxy [java.io.OutputStream] []
            (write
