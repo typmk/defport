@@ -83,7 +83,7 @@
   (:require [defport.core :as core]
             [defport.dap :as dap-impl]
             [defport.sugar :as sugar]
-            [defport.util.platform :as platform]))
+            [defport.util.platform :as platform :include-macros true]))
 
 ;; ============================================================================
 ;; Internal State
@@ -343,25 +343,24 @@
 
       ;; Check for custom command first
       (if-let [cmd-def (get commands (keyword command))]
-        (try
+        (platform/try-any
           (let [result ((:handler cmd-def) args ctx)]
             {:result (cond
                        (map? result) result
                        (nil? result) {}
                        :else {:result (pr-str result)
                               :variablesReference 0})})
-          (catch #?(:clj Exception :cljs js/Error) e
+          (catch-any e
             {:error {:code -32603
-                     :message #?(:clj (.getMessage e)
-                                 :cljs (.-message e))}}))
+                     :message (platform/error-message e)}}))
 
         ;; Fall through to adapter's built-in handlers
         (let [result (core/protocol-dispatch adapter command args {:context ctx})]
           ;; Trigger event handlers if applicable
           (when-let [handler (get event-handlers (keyword command))]
-            (try
+            (platform/try-any
               (handler args ctx)
-              (catch #?(:clj Exception :cljs js/Error) _
+              (catch-any _
                 nil)))
           result)))))
 
@@ -560,288 +559,14 @@
     (dap-impl/get-adapter-state (:adapter srv))))
 
 ;; ============================================================================
-;; Client Mode (Level 4)
+;; Client Mode (Level 4) — not included
 ;; ============================================================================
-;; Connect to external DAP debug adapters.
-
-#?(:clj
-   (defn connect!
-     "Connect to an external DAP debug adapter.
-
-      Options:
-        :command - Command vector to spawn adapter [\"node\" \"debugger.js\"]
-        :env     - Environment variables (optional)
-        :dir     - Working directory (optional)
-
-      Returns a client that can be used with client operations.
-
-      Example:
-        (def client (connect! {:command [\"node\" \"./vscode-js-debug/src/dapDebugServer.js\"]}))
-
-        ;; Initialize the connection
-        (client-init! client)
-
-        ;; Debug a program
-        (client-launch! client {:program \"app.js\"})
-
-        ;; Set breakpoints
-        (client-set-breakpoints! client \"src/main.js\" [10 20 30])
-
-        ;; Control execution
-        (client-continue! client 1)
-        (client-step-over! client 1)
-
-        ;; Evaluate expressions
-        (client-evaluate client \"x + y\")
-
-        ;; Disconnect
-        (client-disconnect! client)"
-     [{:keys [command env dir] :as opts}]
-     (dap-impl/create-client opts)))
-
-#?(:clj
-   (defn client-init!
-     "Initialize the DAP connection.
-      Must be called before launch!/attach!.
-      Returns adapter capabilities."
-     [client & {:keys [client-id client-name adapter-id]
-                :or {client-id "defport-dap"
-                     client-name "Defport DAP Client"
-                     adapter-id "unknown"}}]
-     (dap-impl/initialize! client
-       :client-id client-id
-       :client-name client-name
-       :adapter-id adapter-id)))
-
-#?(:clj
-   (defn client-launch!
-     "Launch a debug target.
-      Args map is adapter-specific.
-
-      Common args:
-        :program - Path to program to debug
-        :args    - Command line arguments
-        :cwd     - Working directory
-        :env     - Environment variables
-
-      Example:
-        (client-launch! client {:program \"app.js\" :args [\"--port\" \"3000\"]})"
-     [client args]
-     (dap-impl/launch! client args)))
-
-#?(:clj
-   (defn client-attach!
-     "Attach to a running debug target.
-      Args map is adapter-specific.
-
-      Common args:
-        :host      - Remote host
-        :port      - Debug port
-        :processId - Process ID to attach to
-
-      Example:
-        (client-attach! client {:host \"localhost\" :port 9229})"
-     [client args]
-     (dap-impl/attach! client args)))
-
-#?(:clj
-   (defn client-configuration-done!
-     "Signal that configuration is complete.
-      Call after setting all breakpoints but before continuing."
-     [client]
-     (dap-impl/configuration-done! client)))
-
-#?(:clj
-   (defn client-disconnect!
-     "Disconnect from the debug adapter.
-
-      Options:
-        :terminate-debuggee - Kill the debuggee process (default false)
-        :restart           - Restart the session (default false)"
-     [client & {:keys [terminate-debuggee restart]
-                :or {terminate-debuggee false restart false}}]
-     (dap-impl/disconnect! client
-       :terminate-debuggee terminate-debuggee
-       :restart restart)))
-
-#?(:clj
-   (defn client-set-breakpoints!
-     "Set breakpoints in a source file.
-
-      Lines can be:
-        - Vector of line numbers: [10 20 30]
-        - Vector of breakpoint maps: [{:line 10 :condition \"x > 5\"}]
-
-      Returns vector of Breakpoint objects with :verified status.
-
-      Example:
-        (client-set-breakpoints! client \"src/main.js\" [10 20])
-        (client-set-breakpoints! client \"src/main.js\"
-          [{:line 10 :condition \"x > 5\"}
-           {:line 20 :hitCondition \"3\"}])"
-     [client source-path lines]
-     (dap-impl/set-breakpoints! client source-path lines)))
-
-#?(:clj
-   (defn client-set-function-breakpoints!
-     "Set function breakpoints by name.
-
-      Names can be:
-        - Vector of function names: [\"main\" \"handleRequest\"]
-        - Vector of breakpoint maps: [{:name \"main\" :condition \"args.length > 0\"}]"
-     [client names]
-     (dap-impl/set-function-breakpoints! client names)))
-
-#?(:clj
-   (defn client-set-exception-breakpoints!
-     "Set exception breakpoints.
-      Filters is a vector of exception filter IDs (adapter-specific).
-
-      Example:
-        (client-set-exception-breakpoints! client [\"uncaught\" \"caught\"])"
-     [client filters]
-     (dap-impl/set-exception-breakpoints! client filters)))
-
-#?(:clj
-   (defn client-continue!
-     "Continue execution.
-      Returns true if all threads continued."
-     [client thread-id]
-     (dap-impl/continue! client thread-id)))
-
-#?(:clj
-   (defn client-step-over!
-     "Step over to next statement."
-     [client thread-id]
-     (dap-impl/step-over! client thread-id)))
-
-#?(:clj
-   (defn client-step-in!
-     "Step into function."
-     [client thread-id]
-     (dap-impl/step-in! client thread-id)))
-
-#?(:clj
-   (defn client-step-out!
-     "Step out of current function."
-     [client thread-id]
-     (dap-impl/step-out! client thread-id)))
-
-#?(:clj
-   (defn client-pause!
-     "Pause execution."
-     [client thread-id]
-     (dap-impl/pause! client thread-id)))
-
-#?(:clj
-   (defn client-threads
-     "Get all threads."
-     [client]
-     (dap-impl/threads client)))
-
-#?(:clj
-   (defn client-stack-trace
-     "Get stack trace for a thread.
-
-      Options:
-        :start-frame - Start frame index (default 0)
-        :levels      - Number of frames to return (default 20)"
-     [client thread-id & {:keys [start-frame levels]
-                          :or {start-frame 0 levels 20}}]
-     (dap-impl/stack-trace client thread-id
-       :start-frame start-frame
-       :levels levels)))
-
-#?(:clj
-   (defn client-scopes
-     "Get scopes for a stack frame."
-     [client frame-id]
-     (dap-impl/scopes client frame-id)))
-
-#?(:clj
-   (defn client-variables
-     "Get variables for a scope/variable reference.
-
-      Options:
-        :filter - \"indexed\" or \"named\"
-        :start  - Start index for paging
-        :count  - Number of variables to return"
-     [client variables-reference & {:keys [filter start count]}]
-     (dap-impl/variables client variables-reference
-       :filter filter
-       :start start
-       :count count)))
-
-#?(:clj
-   (defn client-evaluate
-     "Evaluate expression in debug context.
-
-      Context values:
-        \"watch\"     - Watch expression
-        \"repl\"      - REPL evaluation (default)
-        \"hover\"     - Hover tooltip
-        \"clipboard\" - Clipboard value
-        \"variables\" - Variables view
-
-      Options:
-        :frame-id - Evaluate in specific stack frame context
-        :context  - Evaluation context (default \"repl\")
-
-      Returns map with :result, :type, :variablesReference"
-     [client expression & {:keys [frame-id context]
-                           :or {context "repl"}}]
-     (dap-impl/evaluate client expression
-       :frame-id frame-id
-       :context context)))
-
-#?(:clj
-   (defn client-completions
-     "Get code completions.
-
-      Options:
-        :frame-id - Stack frame context
-        :line     - Line number"
-     [client text column & {:keys [frame-id line]}]
-     (dap-impl/completions client text column
-       :frame-id frame-id
-       :line line)))
-
-#?(:clj
-   (defn client-on-event!
-     "Register an event handler for DAP events.
-
-      Events:
-        :initialized - Adapter ready for configuration
-        :stopped     - Execution stopped (breakpoint, step, exception)
-        :continued   - Execution resumed
-        :exited      - Debuggee exited
-        :terminated  - Debug session ended
-        :thread      - Thread started/exited
-        :output      - Console/stdout/stderr output
-        :breakpoint  - Breakpoint state changed
-        :module      - Module loaded/changed/removed
-        :loadedSource - Source file state changed
-        :process     - New process being debugged
-
-      Example:
-        (client-on-event! client :stopped
-          (fn [msg]
-            (println \"Stopped:\" (get-in msg [:body :reason]))))
-
-        (client-on-event! client :output
-          (fn [msg]
-            (print (get-in msg [:body :output]))))"
-     [client event-key handler]
-     (dap-impl/on-event! client event-key handler)))
-
-#?(:clj
-   (defn client-alive?
-     "Check if client is connected."
-     [client]
-     (dap-impl/client-alive? client)))
-
-#?(:clj
-   (defn client-stop!
-     "Stop the client connection."
-     [client]
-     (dap-impl/client-stop client)))
+;;
+;; Defport does not ship a subprocess DAP client. Spawning external
+;; debug adapters and wiring them to stdio is application concern, not
+;; library concern.
+;;
+;; If your application needs to drive an external DAP adapter, spawn
+;; the subprocess yourself (ProcessBuilder / babashka.process / Node's
+;; child_process) and use the cross-platform defport.dap protocol
+;; helpers (make-event, make-response, etc.) to frame messages.

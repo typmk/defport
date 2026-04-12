@@ -21,214 +21,115 @@
     (p/nav-value (p/datafy-value adapter) :method-handlers nil)
     ;; => [\"initialize\" \"tools/list\" \"tools/call\" ...]
 
-  Cross-platform: Works on both JVM (Clojure) and ClojureScript."
+  Cross-platform: Both JVM and ClojureScript use clojure.core.protocols/Datafiable
+  and clojure.datafy/nav. CLJS ships these in core since 1.10."
   (:require [defport.core :as core]
             [defport.registry :as registry]
             [defport.mcp :as mcp]
             [defport.util.platform :as platform]
-            #?(:clj [clojure.core.protocols :as p])))
+            [clojure.core.protocols :as p]))
 
 ;; ============================================================================
 ;; Port Types
 ;; ============================================================================
 
-#?(:clj
-   (extend-type defport.registry.PortImpl
-     p/Datafiable
-     (datafy [port]
-       (with-meta
-         {:type :port
-          :id (:id port)
-          :description (:description port)
-          :input-schema (get-in port [:schema-map :input-schema])
-          :output-schema (get-in port [:schema-map :output-schema])
-          :metadata (:metadata-map port)
-          :has-handler? (some? (:handler-fn port))}
-         {`p/nav (fn [_data k _v]
-                   (case k
-                     :handler-fn (:handler-fn port)
-                     :full-schema (:schema-map port)
-                     nil))})))
-
-   :cljs
-   (extend-type defport.registry.PortImpl
-     IDatafiable
-     (-datafy [port]
-       (with-meta
-         {:type :port
-          :id (:id port)
-          :description (:description port)
-          :input-schema (get-in port [:schema-map :input-schema])
-          :output-schema (get-in port [:schema-map :output-schema])
-          :metadata (:metadata-map port)
-          :has-handler? (some? (:handler-fn port))}
-         {'cljs.core/-nav (fn [_data k _v]
-                            (case k
-                              :handler-fn (:handler-fn port)
-                              :full-schema (:schema-map port)
-                              nil))}))))
+(extend-type defport.registry.PortImpl
+  p/Datafiable
+  (datafy [port]
+    (with-meta
+      {:type :port
+       :id (:id port)
+       :description (:description port)
+       :input-schema (get-in port [:schema-map :input-schema])
+       :output-schema (get-in port [:schema-map :output-schema])
+       :metadata (:metadata-map port)
+       :has-handler? (some? (:handler-fn port))}
+      {`p/nav (fn [_data k _v]
+                (case k
+                  :handler-fn (:handler-fn port)
+                  :full-schema (:schema-map port)
+                  nil))})))
 
 ;; ============================================================================
 ;; Registry Types
 ;; ============================================================================
 
-#?(:clj
-   (extend-type defport.registry.FunctionPortRegistry
-     p/Datafiable
-     (datafy [registry]
-       (let [ports @(:ports* registry)]
-         (with-meta
-           {:type :function-registry
-            :port-count (count ports)
-            :port-ids (vec (keys ports))}
-           {`p/nav (fn [_data k _v]
-                     (case k
-                       :ports (vec (vals ports))
-                       :port-map ports
-                       nil))}))))
+(extend-type defport.registry.FunctionPortRegistry
+  p/Datafiable
+  (datafy [registry]
+    (let [ports @(:ports* registry)]
+      (with-meta
+        {:type :function-registry
+         :port-count (count ports)
+         :port-ids (vec (keys ports))}
+        {`p/nav (fn [_data k _v]
+                  (case k
+                    :ports (vec (vals ports))
+                    :port-map ports
+                    nil))}))))
 
-   :cljs
-   (extend-type defport.registry.FunctionPortRegistry
-     IDatafiable
-     (-datafy [registry]
-       (let [ports @(:ports* registry)]
-         (with-meta
-           {:type :function-registry
-            :port-count (count ports)
-            :port-ids (vec (keys ports))}
-           {'cljs.core/-nav (fn [_data k _v]
-                              (case k
-                                :ports (vec (vals ports))
-                                :port-map ports
-                                nil))})))))
+(extend-type defport.registry.EdnPortRegistry
+  p/Datafiable
+  (datafy [registry]
+    (let [ports @(:ports* registry)]
+      (with-meta
+        {:type :edn-registry
+         :edn-source (:edn-source registry)
+         :port-count (count ports)
+         :port-ids (vec (keys ports))}
+        {`p/nav (fn [_data k _v]
+                  (case k
+                    :ports (vec (vals ports))
+                    :port-map ports
+                    nil))}))))
 
-#?(:clj
-   (extend-type defport.registry.EdnPortRegistry
-     p/Datafiable
-     (datafy [registry]
-       (let [ports @(:ports* registry)]
-         (with-meta
-           {:type :edn-registry
-            :edn-source (:edn-source registry)
-            :port-count (count ports)
-            :port-ids (vec (keys ports))}
-           {`p/nav (fn [_data k _v]
-                     (case k
-                       :ports (vec (vals ports))
-                       :port-map ports
-                       nil))}))))
-
-   :cljs
-   (extend-type defport.registry.EdnPortRegistry
-     IDatafiable
-     (-datafy [registry]
-       (let [ports @(:ports* registry)]
-         (with-meta
-           {:type :edn-registry
-            :edn-source (:edn-source registry)
-            :port-count (count ports)
-            :port-ids (vec (keys ports))}
-           {'cljs.core/-nav (fn [_data k _v]
-                              (case k
-                                :ports (vec (vals ports))
-                                :port-map ports
-                                nil))})))))
-
-#?(:clj
-   (extend-type defport.registry.HybridPortRegistry
-     p/Datafiable
-     (datafy [registry]
-       (let [ports @(:ports* registry)]
-         (with-meta
-           {:type :hybrid-registry
-            :edn-sources (:edn-sources registry)
-            :port-count (count ports)
-            :port-ids (vec (keys ports))}
-           {`p/nav (fn [_data k _v]
-                     (case k
-                       :ports (vec (vals ports))
-                       :port-map ports
-                       nil))}))))
-
-   :cljs
-   (extend-type defport.registry.HybridPortRegistry
-     IDatafiable
-     (-datafy [registry]
-       (let [ports @(:ports* registry)]
-         (with-meta
-           {:type :hybrid-registry
-            :edn-sources (:edn-sources registry)
-            :port-count (count ports)
-            :port-ids (vec (keys ports))}
-           {'cljs.core/-nav (fn [_data k _v]
-                              (case k
-                                :ports (vec (vals ports))
-                                :port-map ports
-                                nil))})))))
+(extend-type defport.registry.HybridPortRegistry
+  p/Datafiable
+  (datafy [registry]
+    (let [ports @(:ports* registry)]
+      (with-meta
+        {:type :hybrid-registry
+         :edn-sources (:edn-sources registry)
+         :port-count (count ports)
+         :port-ids (vec (keys ports))}
+        {`p/nav (fn [_data k _v]
+                  (case k
+                    :ports (vec (vals ports))
+                    :port-map ports
+                    nil))}))))
 
 ;; ============================================================================
 ;; MCP Adapter
 ;; ============================================================================
 
-#?(:clj
-   (extend-type defport.mcp.McpAdapter
-     p/Datafiable
-     (datafy [adapter]
-       (let [handlers @(:method-handlers* adapter)
-             opts (:adapter-opts adapter)
-             state @(:state* adapter)]
-         (with-meta
-           {:type :mcp-adapter
-            :protocol-id :mcp
-            :protocol-version "2025-11-25"
-            :server-info (:server-info adapter)
-            :refactoring-enabled? (:refactoring-enabled? opts)
-            :subscriptions-enabled? (:enable-subscriptions? opts)
-            :uri-scheme (:uri-scheme opts)
-            :method-count (count handlers)
-            :methods (vec (sort (keys handlers)))
-            ;; Protocol state snapshot from instance
-            :active-operations (count (:active-operations state))
-            :resource-subscriptions (count (:resource-subscriptions state))
-            :elicitations (count (:elicitation state))
-            :sampling-requests (count (:sampling state))}
-           {`p/nav (fn [_data k _v]
-                     (case k
-                       :method-handlers handlers
-                       :adapter-opts opts
-                       :performance (:performance opts)
-                       :state state
-                       nil))}))))
-
-   :cljs
-   (extend-type defport.mcp.McpAdapter
-     IDatafiable
-     (-datafy [adapter]
-       (let [handlers @(:method-handlers* adapter)
-             opts (:adapter-opts adapter)
-             state @(:state* adapter)]
-         (with-meta
-           {:type :mcp-adapter
-            :protocol-id :mcp
-            :protocol-version "2025-11-25"
-            :server-info (:server-info adapter)
-            :refactoring-enabled? (:refactoring-enabled? opts)
-            :subscriptions-enabled? (:enable-subscriptions? opts)
-            :uri-scheme (:uri-scheme opts)
-            :method-count (count handlers)
-            :methods (vec (sort (keys handlers)))
-            ;; Protocol state snapshot from instance
-            :active-operations (count (:active-operations state))
-            :resource-subscriptions (count (:resource-subscriptions state))
-            :elicitations (count (:elicitation state))
-            :sampling-requests (count (:sampling state))}
-           {'cljs.core/-nav (fn [_data k _v]
-                              (case k
-                                :method-handlers handlers
-                                :adapter-opts opts
-                                :performance (:performance opts)
-                                :state state
-                                nil))})))))
+(extend-type defport.mcp.McpAdapter
+  p/Datafiable
+  (datafy [adapter]
+    (let [handlers @(:method-handlers* adapter)
+          opts (:adapter-opts adapter)
+          state @(:state* adapter)]
+      (with-meta
+        {:type :mcp-adapter
+         :protocol-id :mcp
+         :protocol-version "2025-11-25"
+         :server-info (:server-info adapter)
+         :refactoring-enabled? (:refactoring-enabled? opts)
+         :subscriptions-enabled? (:enable-subscriptions? opts)
+         :uri-scheme (:uri-scheme opts)
+         :method-count (count handlers)
+         :methods (vec (sort (keys handlers)))
+         ;; Protocol state snapshot from instance
+         :active-operations (count (:active-operations state))
+         :resource-subscriptions (count (:resource-subscriptions state))
+         :elicitations (count (:elicitation state))
+         :sampling-requests (count (:sampling state))}
+        {`p/nav (fn [_data k _v]
+                  (case k
+                    :method-handlers handlers
+                    :adapter-opts opts
+                    :performance (:performance opts)
+                    :state state
+                    nil))}))))
 
 ;; ============================================================================
 ;; Convenience Functions

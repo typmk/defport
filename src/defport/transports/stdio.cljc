@@ -13,6 +13,7 @@
   - JVM: Full support with proper message framing
   - Node.js: Basic support (line-based, simpler framing)"
   (:require [defport.core :as core]
+            [defport.util.platform :as platform :include-macros true]
             [clojure.core.async :as async]
             #?(:clj [clojure.java.io :as io])
             #?(:clj [cheshire.core :as json]))
@@ -224,43 +225,77 @@
 ;; ============================================================================
 
 #?(:cljs
-   (defrecord StdioTransport [running?* readline-interface]
-     core/Transport
-     (transport-id [_] :stdio)
+   (do
+     (defn- send-response!
+       "Write a JSON response to stdout as a newline-delimited line.
+       This is the MCP stdio convention (one JSON message per line).
+       LSP/DAP stdio servers that need Content-Length framing should
+       use a protocol-specific transport."
+       [response]
+       (when (some? response)
+         (.write js/process.stdout
+                 (str (platform/json-encode response) "\n"))))
 
-     (transport-start [this handler]
-       (reset! running?* true)
-       (let [readline (js/require "readline")
-             rl (.createInterface readline
-                  #js {:input js/process.stdin
-                       :output js/process.stdout
-                       :terminal false})]
-         (reset! readline-interface rl)
-         (.on rl "line"
-              (fn [line]
-                (try
-                  (let [request (js->clj (js/JSON.parse line) :keywordize-keys true)
-                        response (handler request)]
-                    (when response
-                      (core/transport-send this response)))
-                  (catch js/Error e
-                    (.error js/console "Error processing request:" (.-message e))))))
-         (.on rl "close"
-              (fn []
-                (reset! running?* false))))
-       nil)
+     (defn- write-error-response!
+       "Write a JSON-RPC error response to stdout."
+       [request-id err]
+       (send-response!
+         {:jsonrpc "2.0"
+          :id request-id
+          :error {:code -32603
+                  :message (str "Internal error: "
+                                (platform/error-message err))}}))
 
-     (transport-stop [_]
-       (when-let [rl @readline-interface]
-         (.close rl))
-       (reset! running?* false))
+     (defrecord StdioTransport [running?* readline-interface]
+       core/Transport
+       (transport-id [_] :stdio)
 
-     (transport-send [_ message]
-       ;; Node.js: Write with Content-Length framing
-       (let [content (js/JSON.stringify (clj->js message))
-             header (str "Content-Length: " (.-length content) "\r\n\r\n")]
-         (.write js/process.stdout header)
-         (.write js/process.stdout content)))))
+       (transport-start [this handler]
+         (reset! running?* true)
+         (let [readline (js/require "readline")
+               rl (.createInterface readline
+                    #js {:input js/process.stdin
+                         :output js/process.stdout
+                         :terminal false})]
+           (reset! readline-interface rl)
+           (.on rl "line"
+                (fn [line]
+                  ;; Each line is one JSON-RPC message. The callback body is
+                  ;; synchronous Node code: parse → dispatch → unwrap → write.
+                  ;; If the handler returns a js/Promise, we chain .then rather
+                  ;; than blocking the event loop.
+                  (platform/try-any
+                    (let [request (platform/json-decode line)
+                          result (handler request)]
+                      (cond
+                        ;; Plain value → write synchronously
+                        (not (instance? js/Promise result))
+                        (send-response! result)
+
+                        ;; Promise → chain .then, write when resolved
+                        :else
+                        (-> result
+                            (.then send-response!)
+                            (.catch (fn [err]
+                                      (write-error-response!
+                                        (:id request) err))))))
+                    (catch-any e
+                      (.error js/console "Error processing request:" line)
+                      (.error js/console (platform/error-message e))))))
+           (.on rl "close"
+                (fn []
+                  (reset! running?* false))))
+         nil)
+
+       (transport-stop [_]
+         (when-let [rl @readline-interface]
+           (.close rl))
+         (reset! running?* false))
+
+       (transport-send [_ message]
+         ;; For async notifications (e.g., progress, log messages) coming
+         ;; from outside the request loop. MCP uses newline-delimited JSON.
+         (send-response! message)))))
 
 ;; ============================================================================
 ;; Public API

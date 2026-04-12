@@ -37,11 +37,9 @@
    ## Spec Reference
    https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/"
   (:require [defport.core :as core]
-            [clojure.string :as str]
-            #?(:clj [cheshire.core :as json])
-            #?(:cljs [cljs.reader :as reader]))
-  #?(:clj (:import [java.io BufferedReader BufferedWriter InputStreamReader OutputStreamWriter]
-                   [java.net URLDecoder URLEncoder]
+            [defport.util.platform :as platform :include-macros true]
+            [clojure.string :as str])
+  #?(:clj (:import [java.net URLDecoder URLEncoder]
                    [java.nio.charset StandardCharsets])))
 
 ;; =============================================================================
@@ -896,10 +894,8 @@
 (defn encode-lsp-message
   "Encode message with LSP Content-Length header."
   [msg]
-  (let [json-str #?(:clj (json/generate-string msg)
-                    :cljs (js/JSON.stringify (clj->js msg)))
-        byte-length #?(:clj (count (.getBytes ^String json-str "UTF-8"))
-                       :cljs (.-length json-str))]
+  (let [json-str (platform/json-encode msg)
+        byte-length (platform/utf8-byte-length json-str)]
     (str "Content-Length: " byte-length "\r\n\r\n" json-str)))
 
 (defn parse-lsp-headers
@@ -911,38 +907,8 @@
               :when k]
           [(clojure.string/lower-case k) (clojure.string/trim v)])))
 
-#?(:clj
-   (defn read-lsp-message
-     "Read a single LSP message from BufferedReader.
-      Returns parsed JSON or nil on EOF/error."
-     [^BufferedReader reader]
-     (try
-       (loop [headers []]
-         (when-let [line (.readLine reader)]
-           (if (= line "")
-             ;; Headers complete
-             (let [header-map (parse-lsp-headers (clojure.string/join "\n" headers))
-                   content-length (some-> (get header-map "content-length")
-                                          Long/parseLong)]
-               (when content-length
-                 (let [buffer (char-array content-length)
-                       chars-read (.read reader buffer 0 content-length)]
-                   (when (= chars-read content-length)
-                     (json/parse-string (String. buffer) true)))))
-             ;; Continue reading headers
-             (recur (conj headers line)))))
-       (catch Exception e
-         (tap> {:event :lsp/read-error :error (.getMessage e)})
-         nil))))
-
-#?(:clj
-   (defn write-lsp-message
-     "Write an LSP message to BufferedWriter."
-     [^BufferedWriter writer msg]
-     (let [encoded (encode-lsp-message msg)]
-       (locking writer
-         (.write writer encoded)
-         (.flush writer)))))
+;; read-lsp-message and write-lsp-message (JVM-only BufferedReader/Writer
+;; framing implementations) live in defport.lsp-client.
 
 ;; =============================================================================
 ;; Section 6: URI Utilities
@@ -1078,8 +1044,7 @@
             :content content
             :version version
             :languageId language-id
-            :openedAt #?(:clj (System/currentTimeMillis)
-                         :cljs (.now js/Date))}))
+            :openedAt (platform/now-ms)}))
 
   (doc-change [_ uri changes version]
     (swap! documents* update uri
@@ -1126,15 +1091,15 @@
                      :adapter this
                      :document-store document-store)]
       (if handler
-        (try
+        (platform/try-any
           (let [result (handler params ctx)]
             (tap> {:event :lsp/method-handled :method method})
             result)
-          (catch #?(:clj Exception :cljs :default) e
+          (catch-any e
             (tap> {:event :lsp/method-error :method method
-                   :error #?(:clj (.getMessage e) :cljs (.-message e))})
+                   :error (platform/error-message e)})
             (error-response :internal-error
-                            #?(:clj (.getMessage e) :cljs (.-message e)))))
+                            (platform/error-message e))))
         (do
           (tap> {:event :lsp/method-not-found :method method})
           (error-response :method-not-found
@@ -1306,118 +1271,9 @@
   (client-alive? [this]
     "Check if client is connected."))
 
-#?(:clj
-   (defrecord StdioLspClient [process
-                              ^BufferedReader reader
-                              ^BufferedWriter writer
-                              request-id*
-                              pending*
-                              alive?*
-                              reader-thread]
-     LspClient
-     (client-start [this]
-       this) ; Already started in constructor
-
-     (client-request [this method params]
-       (when @alive?*
-         (let [id (swap! request-id* inc)
-               msg (request-message id method params)
-               response-promise (promise)]
-           (swap! pending* assoc id response-promise)
-           (tap> {:event :lsp/client-request :id id :method method})
-           (write-lsp-message writer msg)
-           (let [result (deref response-promise 30000 ::timeout)]
-             (swap! pending* dissoc id)
-             (if (= result ::timeout)
-               {:error (error-response :request-failed "Request timed out")}
-               result)))))
-
-     (client-request-async [this method params callback]
-       (when @alive?*
-         (let [id (swap! request-id* inc)
-               msg (request-message id method params)]
-           (swap! pending* assoc id callback)
-           (tap> {:event :lsp/client-request-async :id id :method method})
-           (write-lsp-message writer msg))))
-
-     (client-notify [this method params]
-       (when @alive?*
-         (let [msg (notification-message method params)]
-           (tap> {:event :lsp/client-notify :method method})
-           (write-lsp-message writer msg))))
-
-     (client-stop [this]
-       (when (compare-and-set! alive?* true false)
-         (try
-           (client-request this m:shutdown nil)
-           (client-notify this m:exit nil)
-           (catch Exception _))
-         (.destroy ^Process process)
-         ;; Complete pending with errors
-         (doseq [[id p] @pending*]
-           (when (instance? clojure.lang.IPending p)
-             (deliver p {:error (error-response :server-cancelled "Client stopped")})))))
-
-     (client-alive? [_]
-       @alive?*)))
-
-#?(:clj
-   (defn- start-client-reader-thread
-     "Start background thread to read responses from LSP server."
-     [^BufferedReader reader pending* alive?*]
-     (doto (Thread.
-            (fn []
-              (try
-                (while @alive?*
-                  (when-let [msg (read-lsp-message reader)]
-                    (tap> {:event :lsp/client-received :message msg})
-                    (if-let [id (:id msg)]
-                      ;; Response
-                      (when-let [handler (get @pending* id)]
-                        (if (fn? handler)
-                          (handler msg)
-                          (deliver handler msg)))
-                      ;; Server notification
-                      (tap> {:event :lsp/server-notification
-                             :method (:method msg)
-                             :params (:params msg)}))))
-                (catch Exception e
-                  (when @alive?*
-                    (tap> {:event :lsp/client-reader-error
-                           :error (.getMessage e)}))))))
-       (.setDaemon true)
-       (.setName "defport-lsp-client-reader")
-       (.start))))
-
-#?(:clj
-   (defn create-client
-     "Create an LSP client that connects to an external server via stdio.
-
-      Options:
-        :command - Command vector [\"pyright-langserver\" \"--stdio\"]
-        :env     - Environment variables map (optional)
-        :dir     - Working directory (optional)
-
-      Example:
-      (def client (create-client {:command [\"clojure-lsp\"]}))
-      (client-request client \"initialize\" {...})
-      (client-notify client \"initialized\" {})
-      (client-request client \"textDocument/hover\" {...})"
-     [{:keys [command env dir]}]
-     (let [pb (ProcessBuilder. ^java.util.List (vec command))
-           _ (when dir (.directory pb (java.io.File. ^String dir)))
-           _ (when env (.putAll (.environment pb) ^java.util.Map env))
-           process (.start pb)
-           reader (BufferedReader.
-                   (InputStreamReader. (.getInputStream process) "UTF-8"))
-           writer (BufferedWriter.
-                   (OutputStreamWriter. (.getOutputStream process) "UTF-8"))
-           request-id* (atom 0)
-           pending* (atom {})
-           alive?* (atom true)
-           reader-thread (start-client-reader-thread reader pending* alive?*)]
-       (->StdioLspClient process reader writer request-id* pending*
-                         alive?* reader-thread))))
+;; StdioLspClient, start-client-reader-thread, and create-client
+;; (JVM-only subprocess LSP client implementation) live in
+;; defport.lsp-client.
 
 ;; =============================================================================
 ;; Section 12: Convenience Client API
@@ -1429,8 +1285,7 @@
    Returns InitializeResult with server capabilities."
   [client root-uri & {:keys [capabilities]}]
   (let [response (client-request client m:initialize
-                  {:processId #?(:clj (.pid (java.lang.ProcessHandle/current))
-                                 :cljs nil)
+                  {:processId (platform/process-id)
                    :rootUri root-uri
                    :capabilities (or capabilities default-client-capabilities)})]
     (when-not (:error response)
@@ -1585,7 +1440,7 @@
   (let [handler (:handler port-def)
         transform (get-in port-def [:metadata :lsp :transform])]
     (fn [params context]
-      (try
+      (platform/try-any
         (let [;; Convert LSP params to port params
               port-params (cond-> {}
                             (:textDocument params)
@@ -1606,10 +1461,9 @@
               ;; Extract result data
               data (or (:result result) result)]
           (transform-result transform data))
-        (catch #?(:clj Exception :cljs :default) e
+        (catch-any e
           (error-response :internal-error
-                          #?(:clj (.getMessage e)
-                             :cljs (.-message e))))))))
+                          (platform/error-message e)))))))
 
 (defn find-ports-for-lsp
   "Find all registered ports with :lsp metadata.

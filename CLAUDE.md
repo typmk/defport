@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **defport** is a **LOW-LEVEL LIBRARY** for building protocol servers (MCP, LSP, DAP). It provides protocol adapters, NOT application frameworks.
 
-**Status:** Phase 6 Complete | 141 tests, 1,027 assertions, 0 failures | 100% MCP 2025-06-18 spec compliant
+**Status:** 299 tests, 1845 assertions, 0 failures | 100% MCP 2025-11-25 spec compliant
 
 ## Critical: Library Philosophy
 
@@ -25,6 +25,55 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Do NOT add metrics collectors** - Applications use Prometheus/iapetos
 - **Do NOT add framework features** - defport integrates into YOUR stack
 - **Focus on protocol adapters and documentation**
+
+## Core Design Principles (non-negotiable)
+
+These are the rules that keep defport thin, composable, and long-lived. Violating any of them is a regression.
+
+### 1. Synchronous port handler contract
+
+Port handlers are `(fn [context] result)`. Plain functions. Defport calls them synchronously and wraps the return value as a protocol response.
+
+- **Never** add an async primitive to the handler contract.
+- **Never** require handlers to return channels, promises, or deferreds.
+- **Do** let handlers optionally return async types that defport unwraps via `Unwrappable` (feature detection, no hard deps).
+- The rule: the **common case is a plain return value**, async is opt-in.
+
+See `docs/ARCHITECTURE.md` → "Concurrency Model" for full reasoning.
+
+### 2. Users bring their own async
+
+Defport does not depend on core.async, promesa, manifold, or any async library. Users who want async in their handlers use whatever they like — Pedestal interceptors, Ring+manifold chains, go-blocks, `future`, raw `Thread`, Node Promises, callbacks.
+
+Feature-detect known async types (`clojure.lang.IDeref`, `js/Promise`, `manifold.deferred/deferred?` via `requiring-resolve`) for transparent unwrapping. Never hard-depend.
+
+### 3. Defport is the protocol intersection
+
+Defport holds what MCP, LSP, and DAP have in common: JSON-RPC framing, dispatch, cancellation, progress, state, content formatting, error mapping. Protocol-specific concerns (MCP tools, LSP text operations, DAP breakpoints) live in their respective adapters as thin mappings over the shared core.
+
+A single port definition should be exposable via all three protocols with zero protocol-specific knowledge in the port itself.
+
+### 4. Transport, not dispatcher, manages concurrency
+
+- **Stdio**: one process = one peer = sequential. No concurrency primitives needed anywhere.
+- **HTTP**: concurrency lives in the transport (thread pool on JVM, event loop on Node). Defport's core still sees one request at a time.
+- Defport dispatch is a synchronous function from one request to one response. Concurrency *around* it is somebody else's problem.
+
+### 5. The server/client asymmetry
+
+- **Server-side defport** is fully synchronous and fully cross-platform. Node's `process.stdin.on('data', ...)` callbacks run synchronously in their body; no async machinery is needed.
+- **Client-side defport** (spawning external MCP/LSP/DAP servers via `connect!`) inherently needs async on Node because you can't block the event loop. This is the one place where a platform semantic gap is real, and it is isolated to client module code.
+- Client-side features may ship JVM-only until someone writes the Node implementation. This is acceptable and honest.
+
+### 6. Reader conditionals are for structural platform gaps only
+
+After the cross-platform cleanup, remaining `#?(:clj ... :cljs ...)` conditionals should only appear in:
+
+- `defport.util.platform` (the deliberate abstraction layer)
+- Whole-function `#?(:clj ...)` guards for JVM-only features (client mode, Java IO)
+- `ns` form `:require` blocks (unavoidable)
+
+**Do not reintroduce mechanical conditionals** like `#?(:clj (.getMessage e) :cljs (.-message e))`. Use `platform/error-message` and friends. Use `platform/try-any` instead of reader-conditional catch types.
 
 ## Core Architecture
 

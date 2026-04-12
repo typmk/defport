@@ -83,7 +83,11 @@
   (:require [defport.core :as core]
             [defport.mcp :as mcp-impl]
             [defport.sugar :as sugar]
-            [defport.util.platform :as platform]))
+            ;; :include-macros true tells CLJS to also load macros from
+            ;; this .cljc file under the same alias, so (platform/try-any ...)
+            ;; call sites resolve the macro correctly on both platforms.
+            ;; Clojure ignores this key.
+            [defport.util.platform :as platform :include-macros true]))
 
 ;; ============================================================================
 ;; Internal State
@@ -513,12 +517,12 @@
         (do
           ;; Call on-initialize hook if provided
           (when-let [on-init (:on-initialize hooks)]
-            (try
+            (platform/try-any
               (on-init {:client-info (:clientInfo params)
                         :protocol-version (:protocolVersion params)})
-              (catch #?(:clj Exception :cljs js/Error) e
+              (catch-any e
                 (platform/eprintln (str "on-initialize hook error: "
-                                        #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                        (platform/error-message e))))))
           {:result {:protocolVersion "2025-06-18"
                     :capabilities {:tools {}
                                    :resources (when (seq resources) {})
@@ -533,12 +537,12 @@
         (let [tool-name (:name params)
               tool (some #(when (= (:name %) tool-name) %) tools)]
           (if tool
-            (try
+            (platform/try-any
               (let [ctx (->Context nil request (atom {}) get-lifespan-ctx)
                     result ((:handler tool) (assoc ctx :params (:arguments params)))]
                 {:result (if (:content result) result {:content [{:type "text" :text (str result)}]})})
-              (catch #?(:clj Exception :cljs js/Error) e
-                {:error {:code -32603 :message #?(:clj (.getMessage e) :cljs (.-message e))}}))
+              (catch-any e
+                {:error {:code -32603 :message (platform/error-message e)}}))
             {:error {:code -32601 :message (str "Tool not found: " tool-name)}}))
 
         "resources/list"
@@ -553,12 +557,12 @@
         (let [uri (:uri params)
               res (some #(when (= (:uri %) uri) %) resources)]
           (if res
-            (try
+            (platform/try-any
               {:result {:contents [{:uri uri
                                     :mimeType (:mime-type res "text/plain")
                                     :text (str ((:handler res) params))}]}}
-              (catch #?(:clj Exception :cljs js/Error) e
-                {:error {:code -32603 :message #?(:clj (.getMessage e) :cljs (.-message e))}}))
+              (catch-any e
+                {:error {:code -32603 :message (platform/error-message e)}}))
             {:error {:code -32002 :message (str "Resource not found: " uri)}}))
 
         "prompts/list"
@@ -569,10 +573,10 @@
         (let [prompt-name (:name params)
               prompt (some #(when (= (:name %) prompt-name) %) prompts)]
           (if prompt
-            (try
+            (platform/try-any
               {:result ((:handler prompt) (:arguments params {}))}
-              (catch #?(:clj Exception :cljs js/Error) e
-                {:error {:code -32603 :message #?(:clj (.getMessage e) :cljs (.-message e))}}))
+              (catch-any e
+                {:error {:code -32603 :message (platform/error-message e)}}))
             {:error {:code -32601 :message (str "Prompt not found: " prompt-name)}}))
 
         "ping"
@@ -645,11 +649,11 @@
 
     ;; Call on-start hook
     (when-let [on-start (:on-start hooks)]
-      (try
+      (platform/try-any
         (on-start server)
-        (catch #?(:clj Exception :cljs js/Error) e
+        (catch-any e
           (platform/eprintln (str "on-start hook error: "
-                                  #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                  (platform/error-message e))))))
 
     (sugar/print-startup-banner
      (:name server) (:version server)
@@ -669,20 +673,20 @@
       (finally
         ;; Call on-stop hook
         (when-let [on-stop (:on-stop hooks)]
-          (try
+          (platform/try-any
             (on-stop server)
-            (catch #?(:clj Exception :cljs js/Error) e
+            (catch-any e
               (platform/eprintln (str "on-stop hook error: "
-                                      #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                      (platform/error-message e))))))
 
         ;; Run lifespan cleanup
         (when-let [cleanup-fn (:cleanup lifespan-config)]
           (when-let [ctx @(:lifespan-context* server)]
-            (try
+            (platform/try-any
               (cleanup-fn ctx)
-              (catch #?(:clj Exception :cljs js/Error) e
+              (catch-any e
                 (platform/eprintln (str "lifespan cleanup error: "
-                                        #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                        (platform/error-message e))))))
           (reset! (:lifespan-context* server) nil)
           (reset! *lifespan-context nil))))))
 
@@ -730,11 +734,11 @@
 
      ;; Call on-start hook
      (when-let [on-start (:on-start hooks)]
-       (try
+       (platform/try-any
          (on-start srv)
-         (catch #?(:clj Exception :cljs js/Error) e
+         (catch-any e
            (platform/eprintln (str "on-start hook error: "
-                                   #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                   (platform/error-message e))))))
 
      ;; Create lifespan context accessor
      (let [lifespan-ctx-fn (when lifespan-config
@@ -760,20 +764,20 @@
          (finally
            ;; Call on-stop hook
            (when-let [on-stop (:on-stop hooks)]
-             (try
+             (platform/try-any
                (on-stop srv)
-               (catch #?(:clj Exception :cljs js/Error) e
+               (catch-any e
                  (platform/eprintln (str "on-stop hook error: "
-                                         #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                         (platform/error-message e))))))
 
            ;; Run lifespan cleanup
            (when-let [cleanup-fn (:cleanup lifespan-config)]
              (when-let [ctx @*lifespan-context]
-               (try
+               (platform/try-any
                  (cleanup-fn ctx)
-                 (catch #?(:clj Exception :cljs js/Error) e
+                 (catch-any e
                    (platform/eprintln (str "lifespan cleanup error: "
-                                           #?(:clj (.getMessage e) :cljs (.-message e)))))))
+                                           (platform/error-message e))))))
              (reset! *lifespan-context nil))))))))
 
 (defn stop!
@@ -786,22 +790,22 @@
   ;; Call on-stop hook if registered
   (when-let [hooks @*lifecycle-hooks]
     (when-let [on-stop (:on-stop hooks)]
-      (try
+      (platform/try-any
         (on-stop @*server)
-        (catch #?(:clj Exception :cljs js/Error) e
+        (catch-any e
           (platform/eprintln (str "on-stop hook error: "
-                                  #?(:clj (.getMessage e) :cljs (.-message e))))))))
+                                  (platform/error-message e)))))))
 
   ;; Run lifespan cleanup
   (when-let [srv @*server]
     (when-let [lifespan-config (:lifespan-config srv)]
       (when-let [cleanup-fn (:cleanup lifespan-config)]
         (when-let [ctx @*lifespan-context]
-          (try
+          (platform/try-any
             (cleanup-fn ctx)
-            (catch #?(:clj Exception :cljs js/Error) e
+            (catch-any e
               (platform/eprintln (str "lifespan cleanup error: "
-                                      #?(:clj (.getMessage e) :cljs (.-message e))))))))))
+                                      (platform/error-message e)))))))))
 
   ;; Stop transport
   (sugar/stop-transport! {:transport-atom *transport
@@ -1017,216 +1021,21 @@
 (def eprintln sugar/eprintln)
 
 ;; ============================================================================
-;; Client Mode
+;; Client Mode — not included
 ;; ============================================================================
-;; Connect to external MCP servers.
-
-#?(:clj
-   (defn- require-and-call
-     "Require namespace and call function. Used to avoid circular deps."
-     [sym & args]
-     (require (symbol (namespace sym)))
-     (apply (resolve sym) args)))
-
-#?(:clj
-   (defn connect!
-     "Connect to an external MCP server via stdio and initialize.
-
-      Options:
-        :command     - Command vector to spawn server [\"npx\" \"-y\" \"@anthropic/mcp-server-xxx\"]
-        :env         - Environment variables (optional)
-        :dir         - Working directory (optional)
-        :client-info - Map with :name and :version (default: defport/1.0)
-
-      Returns a connected client ready for client-* operations.
-
-      Example:
-        (def client (connect! {:command [\"npx\" \"-y\" \"@anthropic/mcp-server-filesystem\"]
-                               :client-info {:name \"my-app\" :version \"1.0\"}}))
-
-        ;; Explore available tools
-        (client-list-tools client)
-
-        ;; Call a tool
-        (client-call-tool client \"read_file\" {:path \"/tmp/test.txt\"})
-
-        ;; List and read resources
-        (client-list-resources client)
-        (client-read-resource client \"file:///etc/hosts\")
-
-        ;; Work with prompts
-        (client-list-prompts client)
-        (client-get-prompt client \"summarize\" {:text \"Hello world\"})
-
-        ;; Clean up
-        (client-disconnect! client)"
-     [{:keys [client-info] :as opts}]
-     (let [;; Start the subprocess
-           command (:command opts)
-           env (:env opts)
-           dir (:dir opts)
-           pb (ProcessBuilder. ^java.util.List (vec command))
-           _ (when dir (.directory pb (java.io.File. ^String dir)))
-           _ (when env (.putAll (.environment pb) ^java.util.Map env))
-           process (.start pb)
-           ;; Server's stdout -> our input, Server's stdin -> our output
-           input-stream (.getInputStream process)
-           output-stream (.getOutputStream process)
-           ;; Create transport with process streams
-           transport (require-and-call 'defport.transports.stdio/create-stdio-transport
-                                       {:input-stream input-stream
-                                        :output-stream output-stream})
-           ;; Create client
-           client (mcp-impl/create-mcp-client (dissoc opts :command :env :dir :client-info))
-           ;; Store process for cleanup
-           _ (reset! (:transport* client) {:transport transport :process process})
-           ;; Initialize connection
-           info (or client-info {:name "defport" :version "1.0"})
-           result (core/protocol-connect client transport info)]
-       (if (:error result)
-         (do
-           (.destroy process)
-           (throw (ex-info (str "Failed to connect: " (get-in result [:error :message]))
-                           {:error (:error result)})))
-         client))))
-
-#?(:clj
-   (defn client-list-tools
-     "List available tools from the MCP server.
-
-      Returns {:result {:tools [...]}} or {:error ...}"
-     ([client]
-      (client-list-tools client nil))
-     ([client cursor]
-      (mcp-impl/client-list-tools client cursor))))
-
-#?(:clj
-   (defn client-call-tool
-     "Call a tool on the MCP server.
-
-      Returns {:result {:content [...]}} or {:error ...}
-
-      Example:
-        (client-call-tool client \"read_file\" {:path \"/tmp/test.txt\"})
-        (client-call-tool client \"search\" {:query \"defn\" :limit 10})"
-     [client tool-name arguments]
-     (mcp-impl/client-call-tool client tool-name arguments)))
-
-#?(:clj
-   (defn client-list-resources
-     "List available resources from the MCP server.
-
-      Returns {:result {:resources [...]}} or {:error ...}"
-     ([client]
-      (client-list-resources client nil))
-     ([client cursor]
-      (mcp-impl/client-list-resources client cursor))))
-
-#?(:clj
-   (defn client-read-resource
-     "Read a resource from the MCP server.
-
-      Returns {:result {:contents [...]}} or {:error ...}
-
-      Example:
-        (client-read-resource client \"file:///etc/hosts\")"
-     [client uri]
-     (mcp-impl/client-read-resource client uri)))
-
-#?(:clj
-   (defn client-subscribe-resource
-     "Subscribe to resource updates.
-
-      Returns {:result {}} or {:error ...}"
-     [client uri]
-     (mcp-impl/client-subscribe-resource client uri)))
-
-#?(:clj
-   (defn client-unsubscribe-resource
-     "Unsubscribe from resource updates.
-
-      Returns {:result {}} or {:error ...}"
-     [client uri]
-     (mcp-impl/client-unsubscribe-resource client uri)))
-
-#?(:clj
-   (defn client-list-prompts
-     "List available prompts from the MCP server.
-
-      Returns {:result {:prompts [...]}} or {:error ...}"
-     ([client]
-      (client-list-prompts client nil))
-     ([client cursor]
-      (mcp-impl/client-list-prompts client cursor))))
-
-#?(:clj
-   (defn client-get-prompt
-     "Get a prompt from the MCP server.
-
-      Returns {:result {:messages [...]}} or {:error ...}
-
-      Example:
-        (client-get-prompt client \"summarize\" {:text \"Hello world\"})"
-     [client prompt-name arguments]
-     (mcp-impl/client-get-prompt client prompt-name arguments)))
-
-#?(:clj
-   (defn client-ping
-     "Ping the MCP server to check connection.
-
-      Returns {:result {}} or {:error ...}"
-     [client]
-     (mcp-impl/client-ping client)))
-
-#?(:clj
-   (defn client-set-log-level
-     "Set the minimum log level for server messages.
-
-      level - :debug, :info, :warning, or :error
-
-      Returns {:result {}} or {:error ...}"
-     [client level]
-     (mcp-impl/client-set-log-level client level)))
-
-#?(:clj
-   (defn client-server-info
-     "Get the connected server's info.
-
-      Returns server info map or nil if not connected."
-     [client]
-     (mcp-impl/client-server-info client)))
-
-#?(:clj
-   (defn client-server-capabilities
-     "Get the connected server's capabilities.
-
-      Returns capabilities map or nil if not connected."
-     [client]
-     (mcp-impl/client-server-capabilities client)))
-
-#?(:clj
-   (defn client-connected?
-     "Check if client is connected to a server."
-     [client]
-     (mcp-impl/client-connected? client)))
-
-#?(:clj
-   (defn client-disconnect!
-     "Disconnect from the MCP server."
-     [client]
-     (core/protocol-disconnect client)))
-
-#?(:clj
-   (defn client-on-request!
-     "Register a handler for server-initiated requests.
-
-      Common server-initiated requests:
-        - sampling/createMessage - Server requests LLM completion
-        - roots/list - Server requests filesystem roots
-
-      Example:
-        (client-on-request! client \"sampling/createMessage\"
-          (fn [params ctx]
-            {:content {:type \"text\" :text \"Response\"}}))"
-     [client method handler]
-     (core/register-request-handler! client method handler)))
+;;
+;; Defport does not ship a subprocess MCP client. Spawning external MCP
+;; servers and wiring them to stdio is application concern, not
+;; library concern — like HTTP client libraries vs Ring.
+;;
+;; If your application needs to act as an MCP client:
+;;
+;;   1. Spawn the subprocess yourself (ProcessBuilder, babashka.process,
+;;      or Node's child_process for CLJS consumers).
+;;   2. Use (mcp-impl/create-mcp-client opts) to get a ProtocolClient
+;;      that speaks JSON-RPC over the transport you provide.
+;;   3. Wire your process's stdin/stdout to a Transport of your choice
+;;      and call (core/protocol-connect client transport client-info).
+;;
+;; This lets you bring your own subprocess library, your own error
+;; handling, and your own concurrency model.

@@ -3,7 +3,7 @@
 
   Supports progress notifications for protocols that implement progress reporting
   (MCP, LSP, DAP). Progress is reported via JSON-RPC notifications."
-  (:require [cheshire.core :as json]))
+  (:require [defport.util.platform :as platform]))
 
 (def ^:dynamic *progress-stdout* nil)
 
@@ -50,7 +50,7 @@
                         :method method
                         :params params}]
        (binding [*out* stdout]
-         (println (json/generate-string notification))
+         (println (platform/json-encode notification))
          (.flush *out*))))))
 
 (defn create-progress-callback

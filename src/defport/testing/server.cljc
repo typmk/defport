@@ -6,6 +6,7 @@
   (:require [defport.core :as core]
             [defport.registry :as registry]
             [defport.mcp :as mcp]
+            [defport.util.platform :as platform :include-macros true]
             [defport.transports.http :as http-transport]
             [defport.transports.stdio :as stdio-transport]
             #?(:clj [clj-http.client :as http-client])))
@@ -156,7 +157,7 @@
 
         adapter-opts (or (:adapter-opts opts) {})
         handler (fn [request]
-                 (try
+                 (platform/try-any
                    (let [method (:method request)
                          params (:params request {})
                          request-id (:id request)
@@ -173,12 +174,11 @@
                        {:jsonrpc "2.0"
                         :id request-id
                         :result result}))
-                   (catch #?(:clj Exception :cljs js/Error) e
+                   (catch-any e
                      {:jsonrpc "2.0"
                       :id (:id request)
                       :error {:code -32603
-                             :message (str "Internal error: " #?(:clj (.getMessage e)
-                                                                  :cljs (.-message e)))}})))
+                             :message (str "Internal error: " (platform/error-message e))}})))
 
         server-state (core/transport-start transport handler)]
 

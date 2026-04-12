@@ -520,3 +520,100 @@
                                           context)]
       (is (contains? (:capabilities result) :logging))
       (is (map? (get-in result [:capabilities :logging]))))))
+
+;; ============================================================================
+;; Synchronous Contract: Handler Return Types
+;; ============================================================================
+;;
+;; Port handlers are synchronous by contract: (fn [context] result). They
+;; can return plain values OR async types that defport unwraps via
+;; platform/unwrap. These tests verify the contract works end-to-end.
+
+(deftest test-handler-returns-plain-value
+  (testing "Handler returning a plain map works (common case)"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)
+          _ (core/register-port! reg
+              {:id :plain-tool
+               :name "plain-tool"
+               :description "Returns a plain value"
+               :input-schema {:type "object"}
+               :handler (fn [_] {:result {:value 42}})})
+          result (core/protocol-dispatch adapter "tools/call"
+                   {:name "plain-tool" :arguments {}}
+                   {:port-registry reg})]
+      (is (nil? (:error result)))
+      (is (vector? (:content result))))))
+
+(deftest test-handler-returns-future
+  (testing "Handler returning a future is unwrapped synchronously"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)
+          _ (core/register-port! reg
+              {:id :future-tool
+               :name "future-tool"
+               :description "Returns a future"
+               :input-schema {:type "object"}
+               :handler (fn [_]
+                          (future {:result {:from "future"}}))})
+          result (core/protocol-dispatch adapter "tools/call"
+                   {:name "future-tool" :arguments {}}
+                   {:port-registry reg})]
+      (is (nil? (:error result)))
+      (is (vector? (:content result)))
+      ;; The future's inner value is formatted as text content
+      (is (re-find #"future" (get-in result [:content 0 :text]))))))
+
+(deftest test-handler-returns-promise
+  (testing "Handler returning a delivered Clojure promise is unwrapped"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)
+          _ (core/register-port! reg
+              {:id :promise-tool
+               :name "promise-tool"
+               :description "Returns a promise"
+               :input-schema {:type "object"}
+               :handler (fn [_]
+                          (doto (promise)
+                            (deliver {:result {:from "promise"}})))})
+          result (core/protocol-dispatch adapter "tools/call"
+                   {:name "promise-tool" :arguments {}}
+                   {:port-registry reg})]
+      (is (nil? (:error result)))
+      (is (re-find #"promise" (get-in result [:content 0 :text]))))))
+
+(deftest test-handler-returns-delay
+  (testing "Handler returning a delay is unwrapped (forced)"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)
+          _ (core/register-port! reg
+              {:id :delay-tool
+               :name "delay-tool"
+               :description "Returns a delay"
+               :input-schema {:type "object"}
+               :handler (fn [_]
+                          (delay {:result {:from "delay"}}))})
+          result (core/protocol-dispatch adapter "tools/call"
+                   {:name "delay-tool" :arguments {}}
+                   {:port-registry reg})]
+      (is (nil? (:error result)))
+      (is (re-find #"delay" (get-in result [:content 0 :text]))))))
+
+(deftest test-handler-async-return-for-prompts
+  (testing "Async unwrap also works for prompts/get"
+    (let [adapter (mcp/create-mcp-adapter)
+          reg (registry/create-function-registry)
+          _ (core/register-port! reg
+              {:id :async-prompt
+               :name "async-prompt"
+               :description "Prompt handler that returns a future"
+               :input-schema {:type "object"}
+               :handler (fn [_]
+                          (future
+                            {:result "hello from a future"}))
+               :metadata {:prompt true}})
+          result (core/protocol-dispatch adapter "prompts/get"
+                   {:name "async-prompt" :arguments {}}
+                   {:port-registry reg})]
+      (is (nil? (:error result)))
+      (is (vector? (:messages result))))))

@@ -8,7 +8,10 @@
    - Transport lifecycle
    - Introspection helpers
    - Type/schema conversion"
-  (:require [defport.util.platform :as platform]))
+  (:require [defport.core :as core]
+            [defport.transports.stdio :as stdio-transport]
+            [defport.transports.http :as http-transport]
+            [defport.util.platform :as platform]))
 
 ;; ============================================================================
 ;; State Factory
@@ -167,51 +170,47 @@
 ;; Transport Lifecycle
 ;; ============================================================================
 
-#?(:clj
-   (defn start-transport!
-     "Start a transport with the given handler.
+;; Transport lifecycle helpers — cross-platform.
+;; Previously JVM-only via `requiring-resolve`, but the indirection was
+;; unnecessary: there's no circular dependency between sugar and the
+;; transport namespaces. Using direct requires lets CLJS consumers use
+;; these helpers too.
 
-     Options:
-     - :type - :stdio or :http (default :stdio)
-     - :port - HTTP port (default 8080)
-     - :transport-atom - atom to store transport reference
-     - :running-atom - atom to track running state"
-     [handler {:keys [type port transport-atom running-atom]
-               :or {type :stdio port 8080}}]
-     (let [transport (case type
-                       :stdio
-                       (let [create-fn (requiring-resolve 'defport.transports.stdio/create-stdio-transport)]
-                         (create-fn))
+(defn start-transport!
+  "Start a transport with the given handler.
 
-                       :http
-                       (let [create-fn (requiring-resolve 'defport.transports.http/create-http-transport)]
-                         (create-fn {:port port})))]
+  Options:
+  - :type - :stdio or :http (default :stdio)
+  - :port - HTTP port (default 8080)
+  - :transport-atom - atom to store transport reference
+  - :running-atom - atom to track running state"
+  [handler {:keys [type port transport-atom running-atom]
+            :or {type :stdio port 8080}}]
+  (let [transport (case type
+                    :stdio (stdio-transport/create-stdio-transport)
+                    :http  (http-transport/create-http-transport {:port port})
+                    (throw (ex-info (str "Unknown transport type: " type)
+                                    {:type type})))]
+    (when transport-atom
+      (reset! transport-atom transport))
+    (core/transport-start transport handler)
+    (when running-atom
+      (reset! running-atom true))
+    transport))
 
-       (when transport-atom
-         (reset! transport-atom transport))
+(defn stop-transport!
+  "Stop a transport.
 
-       (let [start-fn (requiring-resolve 'defport.core/transport-start)]
-         (start-fn transport handler))
-
-       (when running-atom
-         (reset! running-atom true))
-
-       transport)))
-
-#?(:clj
-   (defn stop-transport!
-     "Stop a transport.
-
-     Options:
-     - :transport-atom - atom containing transport reference
-     - :running-atom - atom to track running state"
-     [{:keys [transport-atom running-atom]}]
-     (when-let [transport (and transport-atom @transport-atom)]
-       ((requiring-resolve 'defport.core/transport-stop) transport))
-     (when transport-atom
-       (reset! transport-atom nil))
-     (when running-atom
-       (reset! running-atom false))))
+  Options:
+  - :transport-atom - atom containing transport reference
+  - :running-atom - atom to track running state"
+  [{:keys [transport-atom running-atom]}]
+  (when-let [transport (and transport-atom @transport-atom)]
+    (core/transport-stop transport))
+  (when transport-atom
+    (reset! transport-atom nil))
+  (when running-atom
+    (reset! running-atom false)))
 
 (defn print-startup-banner
   "Print startup banner to stderr."

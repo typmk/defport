@@ -387,43 +387,47 @@
        (swap! (:options srv) assoc :capabilities new-caps))
      srv)))
 
-#?(:clj
-   (defn run!
-     "Run the LSP server.
+(defn run!
+  "Run the LSP server.
 
-     (run!)                              ; stdio
-     (run! {:transport :http :port 8080})"
-     ([] (run! {}))
-     ([opts]
-      (let [srv (or @*server (server "defport-lsp"))
-            _ (build! srv)
-            adapter (:adapter srv)
-            transport-type (or (:transport opts) :stdio)]
+  (run!)                              ; stdio
+  (run! {:transport :http :port 8080})
 
-        (sugar/print-startup-banner
-         (:name srv) (:version srv)
-         transport-type (count @*handlers) "Handlers"
-         (map (fn [[k _]] {:name (name k)}) @*handlers))
+  On JVM, blocks the main thread until interrupted.
+  On Node, returns immediately — the transport keeps the event loop alive."
+  ([] (run! {}))
+  ([opts]
+   (let [srv (or @*server (server "defport-lsp"))
+         _ (build! srv)
+         adapter (:adapter srv)
+         transport-type (or (:transport opts) :stdio)]
 
-        (sugar/start-transport!
-         (fn [request]
-           (let [method (:method request)
-                 params (:params request)
-                 ctx (->Context adapter (atom {}) @*transport)]
-             (core/protocol-dispatch adapter method params {:context ctx})))
-         {:type transport-type
-          :port (or (:port opts) 8080)
-          :transport-atom *transport
-          :running-atom *running?})
+     (sugar/print-startup-banner
+      (:name srv) (:version srv)
+      transport-type (count @*handlers) "Handlers"
+      (map (fn [[k _]] {:name (name k)}) @*handlers))
 
-        (platform/eprintln "LSP server ready.")
-        @(promise)))))
+     (sugar/start-transport!
+      (fn [request]
+        (let [method (:method request)
+              params (:params request)
+              ctx (->Context adapter (atom {}) @*transport)]
+          (core/protocol-dispatch adapter method params {:context ctx})))
+      {:type transport-type
+       :port (or (:port opts) 8080)
+       :transport-atom *transport
+       :running-atom *running?})
+
+     (platform/eprintln "LSP server ready.")
+     ;; JVM: block forever on an undelivered promise. Node: return —
+     ;; the transport's event-loop listeners keep the process alive.
+     #?(:clj @(promise) :cljs nil))))
 
 (defn stop!
   "Stop the server."
   []
-  #?(:clj (sugar/stop-transport! {:transport-atom *transport
-                                  :running-atom *running?}))
+  (sugar/stop-transport! {:transport-atom *transport
+                          :running-atom *running?})
   (reset! *handlers {})
   (reset! *capabilities {})
   (reset! *server nil)
@@ -431,62 +435,17 @@
   (reset! *running? false))
 
 ;; ============================================================================
-;; Client Mode
+;; Client Mode — not included
 ;; ============================================================================
-
-#?(:clj
-   (defn connect!
-     "Connect to an external LSP server.
-
-     (def client (connect! {:command [\"clojure-lsp\"]}))
-     (hover-at client \"file:///foo.clj\" 10 5)"
-     [{:keys [command env dir root-uri]}]
-     (let [client (lsp/create-client {:command command :env env :dir dir})]
-       (lsp/initialize client (or root-uri (str "file:///" (System/getProperty "user.dir"))))
-       client)))
-
-#?(:clj
-   (defn disconnect!
-     "Disconnect from LSP server."
-     [client]
-     (lsp/client-stop client)))
-
-;; Client convenience functions
-#?(:clj
-   (defn hover-at
-     "Get hover at position."
-     [client uri line col]
-     (lsp/hover-at client uri line col)))
-
-#?(:clj
-   (defn definition-at
-     "Get definition at position."
-     [client uri line col]
-     (lsp/definition-at client uri line col)))
-
-#?(:clj
-   (defn references-at
-     "Get references at position."
-     [client uri line col]
-     (lsp/references-at client uri line col)))
-
-#?(:clj
-   (defn complete-at
-     "Get completions at position."
-     [client uri line col]
-     (lsp/complete-at client uri line col)))
-
-#?(:clj
-   (defn symbols-in
-     "Get symbols in document."
-     [client uri]
-     (lsp/symbols-in-document client uri)))
-
-#?(:clj
-   (defn search-symbols
-     "Search workspace symbols."
-     [client query]
-     (lsp/symbols-in-workspace client query)))
+;;
+;; Defport does not ship a subprocess LSP client. Spawning external
+;; language servers and wiring them to stdio is application concern,
+;; not library concern.
+;;
+;; If your application needs to talk to an external LSP server, spawn
+;; the subprocess yourself and use defport.lsp's encode-lsp-message,
+;; parse-lsp-headers, and request-message helpers to frame JSON-RPC
+;; messages with Content-Length headers.
 
 ;; ============================================================================
 ;; Cross-Protocol Registry Integration

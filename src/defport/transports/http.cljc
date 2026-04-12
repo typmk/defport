@@ -4,7 +4,7 @@
   Provides HTTP server for JSON-RPC 2.0 protocols.
   Platform-agnostic using reader conditionals for JVM (http-kit) vs Node.js (http module)."
   (:require [defport.core :as core]
-            [cheshire.core :as json]
+            [defport.util.platform :as platform]
             #?(:clj [org.httpkit.server :as http-kit])))
 
 #?(:clj
@@ -18,9 +18,9 @@
                     (condp = (:uri request)
                       "/mcp"
                       (let [body (slurp (:body request))
-                            json-request (json/parse-string body true)
+                            json-request (platform/json-decode body)
                             response (handler json-request)
-                            json-response (json/generate-string response)]
+                            json-response (platform/json-encode response)]
                         {:status 200
                          :headers {"Content-Type" "application/json"
                                    "Access-Control-Allow-Origin" (get-in cors-config [:allow-origin] "*")
@@ -31,14 +31,14 @@
                       "/health"
                       {:status 200
                        :headers {"Content-Type" "application/json"}
-                       :body (json/generate-string {:status "healthy"
+                       :body (platform/json-encode {:status "healthy"
                                                     :transport "http"
                                                     :port port})}
 
                       "/info"
                       {:status 200
                        :headers {"Content-Type" "application/json"}
-                       :body (json/generate-string {:name "defport-http"
+                       :body (platform/json-encode {:name "defport-http"
                                                     :version "0.1.0"
                                                     :transport {:type "http"
                                                                :port port
@@ -47,11 +47,11 @@
                       ;; 404 for unknown paths
                       {:status 404
                        :headers {"Content-Type" "application/json"}
-                       :body (json/generate-string {:error "Not found"})})
+                       :body (platform/json-encode {:error "Not found"})})
                     (catch Exception e
                       {:status 500
                        :headers {"Content-Type" "application/json"}
-                       :body (json/generate-string {:error (.getMessage e)})})))
+                       :body (platform/json-encode {:error (.getMessage e)})})))
 
              server (http-kit/run-server app {:port port :host host})]
          (reset! server* server)

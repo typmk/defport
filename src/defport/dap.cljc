@@ -44,17 +44,11 @@
                (when (and (map? e) (= (namespace (:event e)) \"dap\"))
                  (record-metric! e))))"
   (:require [defport.core :as core]
-            [cheshire.core :as json]))
+            [defport.util.platform :as platform :include-macros true]))
 
 ;; ============================================================================
 ;; Observability Helpers
 ;; ============================================================================
-
-(defn- current-timestamp
-  "Get current timestamp in milliseconds."
-  []
-  #?(:clj (System/currentTimeMillis)
-     :cljs (.now js/Date)))
 
 (defn- emit-event!
   "Emit a tap> event for observability.
@@ -63,7 +57,7 @@
   [event-type data]
   (tap> (assoc data
           :event event-type
-          :timestamp (current-timestamp))))
+          :timestamp (platform/now-ms))))
 
 ;; ============================================================================
 ;; DAP Protocol Constants
@@ -225,7 +219,7 @@
       (vector? value)
       (seq? value)
       (set? value)
-      (instance? #?(:clj clojure.lang.IRecord :cljs cljs.core/IRecord) value)))
+      (record? value)))
 
 (defn create-var-ref-for-value
   "Create a variable reference for a Clojure value if it has children."
@@ -641,7 +635,7 @@
         eval-context (keyword (or context "repl"))]
     (emit-event! :dap/evaluate {:expression expression
                                 :context eval-context})
-    (try
+    (platform/try-any
       ;; Try to use evaluate port if registered
       (if-let [eval-port (and port-registry (core/get-port port-registry :evaluate))]
         (let [result (core/port-execute eval-port
@@ -664,8 +658,8 @@
            :type (type-name result)
            :variablesReference (create-var-ref-for-value adapter-state result)}))
 
-      (catch #?(:clj Exception :cljs js/Error) e
-        {:result (str "Error: " #?(:clj (.getMessage e) :cljs (.-message e)))
+      (catch-any e
+        {:result (str "Error: " (platform/error-message e))
          :variablesReference 0}))))
 
 ;; --- Completions ---
@@ -802,19 +796,17 @@
                              :backend-type backend-type
                              :backend-opts backend-opts
                              :server-info server-info)]
-      (try
+      (platform/try-any
         (let [result (handle-request command args enriched-context)]
           (if (:success result)
             result
             {:result result}))
-        (catch #?(:clj Exception :cljs js/Error) e
+        (catch-any e
           (emit-event! :dap/error {:command command
-                                   :error #?(:clj (.getMessage e)
-                                            :cljs (.-message e))})
+                                   :error (platform/error-message e)})
           {:error {:code -32603
                    :message (str "Internal error: "
-                                 #?(:clj (.getMessage e)
-                                    :cljs (.-message e)))}})))))
+                                 (platform/error-message e))}})))))
 
 ;; ============================================================================
 ;; Public API
@@ -931,391 +923,21 @@
         {:reason reason
          :breakpoint breakpoint}))))
 
-;; ============================================================================
-;; DAP Client Implementation
-;; ============================================================================
-;; For connecting to external DAP debug adapters.
-
-(defprotocol DapClient
-  "Client for communicating with external DAP debug adapters."
-  (client-start [this]
-    "Start the client connection.")
-  (client-request [this command arguments]
-    "Send request, block for response.")
-  (client-request-async [this command arguments callback]
-    "Send request, invoke callback with response.")
-  (client-stop [this]
-    "Stop the client connection.")
-  (client-alive? [this]
-    "Check if client is connected."))
-
-#?(:clj
-   (defn- write-dap-message
-     "Write a DAP message with Content-Length header."
-     [^java.io.BufferedWriter writer message]
-     (let [json-str (json/generate-string message)
-           bytes (.getBytes json-str "UTF-8")
-           header (str "Content-Length: " (count bytes) "\r\n\r\n")]
-       (.write writer header)
-       (.write writer json-str)
-       (.flush writer))))
-
-#?(:clj
-   (defn- read-dap-message
-     "Read a DAP message with Content-Length header."
-     [^java.io.BufferedReader reader]
-     (try
-       (loop [headers {}]
-         (let [line (.readLine reader)]
-           (cond
-             (nil? line) nil
-             (= line "") ; End of headers
-             (when-let [content-length (get headers "Content-Length")]
-               (let [len (Integer/parseInt content-length)
-                     buffer (char-array len)]
-                 (.read reader buffer 0 len)
-                 (json/parse-string (String. buffer) true)))
-             :else
-             (let [[k v] (clojure.string/split line #": " 2)]
-               (recur (assoc headers k v))))))
-       (catch Exception e
-         nil))))
-
-#?(:clj
-   (defrecord StdioDapClient [process
-                              ^java.io.BufferedReader reader
-                              ^java.io.BufferedWriter writer
-                              seq-counter*
-                              pending*
-                              alive?*
-                              reader-thread
-                              event-handlers*]
-     DapClient
-     (client-start [this]
-       this) ; Already started in constructor
-
-     (client-request [this command arguments]
-       (when @alive?*
-         (let [seq-num (swap! seq-counter* inc)
-               msg {:seq seq-num
-                    :type "request"
-                    :command command
-                    :arguments arguments}
-               response-promise (promise)]
-           (swap! pending* assoc seq-num response-promise)
-           (tap> {:event :dap/client-request :seq seq-num :command command})
-           (write-dap-message writer msg)
-           (let [result (deref response-promise 30000 ::timeout)]
-             (swap! pending* dissoc seq-num)
-             (if (= result ::timeout)
-               {:success false :message "Request timed out"}
-               result)))))
-
-     (client-request-async [this command arguments callback]
-       (when @alive?*
-         (let [seq-num (swap! seq-counter* inc)
-               msg {:seq seq-num
-                    :type "request"
-                    :command command
-                    :arguments arguments}]
-           (swap! pending* assoc seq-num callback)
-           (tap> {:event :dap/client-request-async :seq seq-num :command command})
-           (write-dap-message writer msg))))
-
-     (client-stop [this]
-       (when (compare-and-set! alive?* true false)
-         (try
-           (client-request this "disconnect" {:terminateDebuggee true})
-           (catch Exception _))
-         (.destroy ^Process process)
-         ;; Complete pending with errors
-         (doseq [[seq-num p] @pending*]
-           (when (instance? clojure.lang.IPending p)
-             (deliver p {:success false :message "Client stopped"})))))
-
-     (client-alive? [_]
-       @alive?*)))
-
-#?(:clj
-   (defn- start-dap-client-reader-thread
-     "Start background thread to read responses from DAP adapter."
-     [^java.io.BufferedReader reader pending* event-handlers* alive?*]
-     (doto (Thread.
-            (fn []
-              (try
-                (while @alive?*
-                  (when-let [msg (read-dap-message reader)]
-                    (tap> {:event :dap/client-received :message msg})
-                    (case (:type msg)
-                      "response"
-                      (when-let [handler (get @pending* (:request_seq msg))]
-                        (if (fn? handler)
-                          (handler msg)
-                          (deliver handler msg)))
-
-                      "event"
-                      (let [event-name (keyword (:event msg))]
-                        (tap> {:event :dap/adapter-event
-                               :dap-event event-name
-                               :body (:body msg)})
-                        (when-let [handler (get @event-handlers* event-name)]
-                          (try (handler msg)
-                               (catch Exception e
-                                 (tap> {:event :dap/event-handler-error
-                                        :error (.getMessage e)})))))
-
-                      ;; Ignore other message types
-                      nil)))
-                (catch Exception e
-                  (when @alive?*
-                    (tap> {:event :dap/client-reader-error
-                           :error (.getMessage e)}))))))
-       (.setDaemon true)
-       (.setName "defport-dap-client-reader")
-       (.start))))
-
-#?(:clj
-   (defn create-client
-     "Create a DAP client that connects to an external debug adapter via stdio.
-
-      Options:
-        :command - Command vector [\"node\" \"debug-adapter.js\"]
-        :env     - Environment variables map (optional)
-        :dir     - Working directory (optional)
-
-      Example:
-        (def client (create-client {:command [\"node\" \"./debugger.js\"]}))
-        (initialize! client)
-        (launch! client {:program \"app.js\"})
-        (set-breakpoints! client \"src/main.js\" [10 20 30])
-        (continue! client 1)
-        (disconnect! client)"
-     [{:keys [command env dir]}]
-     (let [pb (ProcessBuilder. ^java.util.List (vec command))
-           _ (when dir (.directory pb (java.io.File. ^String dir)))
-           _ (when env (.putAll (.environment pb) ^java.util.Map env))
-           process (.start pb)
-           reader (java.io.BufferedReader.
-                   (java.io.InputStreamReader. (.getInputStream process) "UTF-8"))
-           writer (java.io.BufferedWriter.
-                   (java.io.OutputStreamWriter. (.getOutputStream process) "UTF-8"))
-           seq-counter* (atom 0)
-           pending* (atom {})
-           event-handlers* (atom {})
-           alive?* (atom true)
-           reader-thread (start-dap-client-reader-thread reader pending* event-handlers* alive?*)]
-       (->StdioDapClient process reader writer seq-counter* pending*
-                         alive?* reader-thread event-handlers*))))
-
-#?(:clj
-   (defn on-event!
-     "Register an event handler for DAP events.
-
-      Events: :initialized, :stopped, :continued, :exited, :terminated,
-              :thread, :output, :breakpoint, :module, :loadedSource, :process
-
-      Example:
-        (on-event! client :stopped
-          (fn [msg]
-            (println \"Stopped:\" (get-in msg [:body :reason]))))
-        (on-event! client :output
-          (fn [msg]
-            (println (get-in msg [:body :output]))))"
-     [client event-key handler]
-     (swap! (:event-handlers* client) assoc event-key handler)))
 
 ;; ============================================================================
-;; Convenience Client API
+;; DAP Client
 ;; ============================================================================
-;; High-level functions for common DAP operations.
-
-#?(:clj
-   (defn initialize!
-     "Initialize DAP connection.
-      Returns capabilities from the adapter."
-     [client & {:keys [client-id client-name adapter-id lines-start-at-1 columns-start-at-1]
-                :or {client-id "defport"
-                     client-name "Defport DAP Client"
-                     adapter-id "unknown"
-                     lines-start-at-1 true
-                     columns-start-at-1 true}}]
-     (let [response (client-request client "initialize"
-                      {:clientID client-id
-                       :clientName client-name
-                       :adapterID adapter-id
-                       :linesStartAt1 lines-start-at-1
-                       :columnsStartAt1 columns-start-at-1
-                       :pathFormat "path"
-                       :supportsVariableType true
-                       :supportsVariablePaging false
-                       :supportsRunInTerminalRequest false
-                       :supportsMemoryReferences false
-                       :supportsProgressReporting false})]
-       (when (:success response)
-         (:body response)))))
-
-#?(:clj
-   (defn launch!
-     "Launch a debug target.
-      Args is adapter-specific (program, args, cwd, env, etc.)."
-     [client args]
-     (let [response (client-request client "launch" args)]
-       (:success response))))
-
-#?(:clj
-   (defn attach!
-     "Attach to a running debug target.
-      Args is adapter-specific (host, port, processId, etc.)."
-     [client args]
-     (let [response (client-request client "attach" args)]
-       (:success response))))
-
-#?(:clj
-   (defn configuration-done!
-     "Signal that configuration is complete."
-     [client]
-     (let [response (client-request client "configurationDone" {})]
-       (:success response))))
-
-#?(:clj
-   (defn disconnect!
-     "Disconnect from the debug adapter."
-     [client & {:keys [terminate-debuggee restart]
-                :or {terminate-debuggee false restart false}}]
-     (let [response (client-request client "disconnect"
-                      {:terminateDebuggee terminate-debuggee
-                       :restart restart})]
-       (:success response))))
-
-#?(:clj
-   (defn set-breakpoints!
-     "Set breakpoints in a source file.
-      Returns vector of Breakpoint objects."
-     [client source-path lines]
-     (let [response (client-request client "setBreakpoints"
-                      {:source {:path source-path}
-                       :breakpoints (mapv (fn [line]
-                                            (if (map? line) line {:line line}))
-                                          lines)})]
-       (get-in response [:body :breakpoints]))))
-
-#?(:clj
-   (defn set-function-breakpoints!
-     "Set function breakpoints.
-      Names is a vector of function names or maps with :name, :condition, :hitCondition."
-     [client names]
-     (let [response (client-request client "setFunctionBreakpoints"
-                      {:breakpoints (mapv (fn [n]
-                                            (if (map? n) n {:name n}))
-                                          names)})]
-       (get-in response [:body :breakpoints]))))
-
-#?(:clj
-   (defn set-exception-breakpoints!
-     "Set exception breakpoints.
-      Filters is a vector of exception filter IDs (adapter-specific)."
-     [client filters]
-     (let [response (client-request client "setExceptionBreakpoints"
-                      {:filters filters})]
-       (:success response))))
-
-#?(:clj
-   (defn continue!
-     "Continue execution.
-      Returns true if all threads continued."
-     [client thread-id]
-     (let [response (client-request client "continue"
-                      {:threadId thread-id})]
-       (get-in response [:body :allThreadsContinued]))))
-
-#?(:clj
-   (defn step-over!
-     "Step over to next statement."
-     [client thread-id]
-     (let [response (client-request client "next"
-                      {:threadId thread-id})]
-       (:success response))))
-
-#?(:clj
-   (defn step-in!
-     "Step into function."
-     [client thread-id]
-     (let [response (client-request client "stepIn"
-                      {:threadId thread-id})]
-       (:success response))))
-
-#?(:clj
-   (defn step-out!
-     "Step out of current function."
-     [client thread-id]
-     (let [response (client-request client "stepOut"
-                      {:threadId thread-id})]
-       (:success response))))
-
-#?(:clj
-   (defn pause!
-     "Pause execution."
-     [client thread-id]
-     (let [response (client-request client "pause"
-                      {:threadId thread-id})]
-       (:success response))))
-
-#?(:clj
-   (defn threads
-     "Get all threads."
-     [client]
-     (let [response (client-request client "threads" {})]
-       (get-in response [:body :threads]))))
-
-#?(:clj
-   (defn stack-trace
-     "Get stack trace for a thread."
-     [client thread-id & {:keys [start-frame levels]
-                          :or {start-frame 0 levels 20}}]
-     (let [response (client-request client "stackTrace"
-                      {:threadId thread-id
-                       :startFrame start-frame
-                       :levels levels})]
-       (get-in response [:body :stackFrames]))))
-
-#?(:clj
-   (defn scopes
-     "Get scopes for a stack frame."
-     [client frame-id]
-     (let [response (client-request client "scopes"
-                      {:frameId frame-id})]
-       (get-in response [:body :scopes]))))
-
-#?(:clj
-   (defn variables
-     "Get variables for a scope/variable reference."
-     [client variables-reference & {:keys [filter start count]}]
-     (let [response (client-request client "variables"
-                      (cond-> {:variablesReference variables-reference}
-                        filter (assoc :filter filter)
-                        start (assoc :start start)
-                        count (assoc :count count)))]
-       (get-in response [:body :variables]))))
-
-#?(:clj
-   (defn evaluate
-     "Evaluate expression.
-      Context: :watch, :repl, :hover, :clipboard, :variables"
-     [client expression & {:keys [frame-id context]
-                           :or {context "repl"}}]
-     (let [response (client-request client "evaluate"
-                      (cond-> {:expression expression
-                               :context context}
-                        frame-id (assoc :frameId frame-id)))]
-       (when (:success response)
-         (:body response)))))
-
-#?(:clj
-   (defn completions
-     "Get completions for text."
-     [client text column & {:keys [frame-id line]}]
-     (let [response (client-request client "completions"
-                      (cond-> {:text text :column column}
-                        frame-id (assoc :frameId frame-id)
-                        line (assoc :line line)))]
-       (get-in response [:body :targets]))))
+;;
+;; Client-mode (connecting to external DAP debug adapters) is JVM-only
+;; because it uses ProcessBuilder, BufferedReader/Writer, and dedicated
+;; threads. It lives in a separate namespace so this file stays
+;; cross-platform.
+;;
+;;   (require '[defport.dap-client :as dc])
+;;   (def client (dc/create-client {:command ["node" "debugger.js"]}))
+;;   (dc/initialize! client)
+;;   (dc/launch! client {:program "app.js"})
+;;   (dc/continue! client 1)
+;;
+;; On Node/CLJS the equivalent would be a separate defport.dap-client-node
+;; namespace using child_process — not yet implemented.

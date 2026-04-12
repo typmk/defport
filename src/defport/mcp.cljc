@@ -1,8 +1,9 @@
 (ns defport.mcp
-  "Model Context Protocol (MCP) implementation for defport.
+  "Model Context Protocol (MCP) server adapter for defport.
 
-  Supports building both **clients** and **servers** per MCP 2025-11-25 spec.
-  Platform-agnostic using reader conditionals for JVM/Node.js compatibility.
+  Implements the server role of MCP 2025-11-25 spec: receives JSON-RPC
+  requests, dispatches to user-provided port handlers, formats responses.
+  Platform-agnostic (.cljc — works on JVM and Node/CLJS).
 
   ## Building Servers (ProtocolAdapter)
 
@@ -11,19 +12,18 @@
     (def adapter (create-mcp-adapter {:server-info {:name \"my-server\" :version \"1.0\"}}))
     (protocol-dispatch adapter \"tools/call\" {:name \"search\" :arguments {...}} context)
 
-  ## Building Clients (ProtocolClient)
+  The adapter supports server-initiated requests (sampling, elicitation,
+  progress, log messages) via the `send-*-request` / `notify-*` helpers.
+  These send JSON-RPC requests to the connected client over the existing
+  transport — no separate client object is needed.
 
-  Use `create-mcp-client` to build MCP clients that connect to servers:
+  ## Client Role (not shipped)
 
-    (def client (create-mcp-client {:capabilities {:sampling {:tools {}}}}))
-    (protocol-connect client transport {:name \"my-app\" :version \"1.0\"})
-    (client-call-tool client \"search\" {:query \"foo\"})
-
-  Clients can handle server-initiated requests (sampling, elicitation, roots):
-
-    (create-mcp-client
-      {:handlers {\"sampling/createMessage\" (fn [params ctx] {:result {:content ...}})
-                  \"roots/list\" (fn [_ _] {:result {:roots @my-roots}})}})
+  Defport does NOT ship an MCP client for the case where your program
+  wants to spawn and drive an external MCP server. That use case is
+  application concern (like clj-http vs Ring). See the end of this file
+  and `defport.core/ProtocolClient` for the contract you can implement
+  in your own code.
 
   ## Observability via tap>
 
@@ -51,22 +51,16 @@
                (when (and (map? e) (:event e))
                  (record-metric! e))))"
   (:require [defport.core :as core]
+            [defport.util.platform :as platform :include-macros true]
             [defport.util.protocol :as proto-util]
             [defport.util.pagination :as pagination]
             [defport.util.progress :as progress]
             [defport.util.content :as content]
-            [defport.util.batch :as batch]
-            [cheshire.core :as json]))
+            [defport.util.batch :as batch]))
 
 ;; ============================================================================
 ;; Observability Helpers
 ;; ============================================================================
-
-(defn- current-timestamp
-  "Get current timestamp in milliseconds."
-  []
-  #?(:clj (System/currentTimeMillis)
-     :cljs (.now js/Date)))
 
 (defn- emit-event!
   "Emit a tap> event for observability.
@@ -75,7 +69,7 @@
   [event-type data]
   (tap> (assoc data
           :event event-type
-          :timestamp (current-timestamp))))
+          :timestamp (platform/now-ms))))
 
 ;; ============================================================================
 ;; Configuration
@@ -84,10 +78,7 @@
 (def ^:private refactoring-enabled?
   "Check if dangerous refactoring tools are enabled via environment variable.
   Set DEFPORT_ENABLE_REFACTORING=true to enable."
-  (Boolean/parseBoolean (or #?(:clj (System/getenv "DEFPORT_ENABLE_REFACTORING")
-                               :cljs (when (exists? js/process)
-                                      (aget (.-env js/process) "DEFPORT_ENABLE_REFACTORING")))
-                           "false")))
+  (= "true" (platform/get-env "DEFPORT_ENABLE_REFACTORING" "false")))
 
 ;; ============================================================================
 ;; Protocol State — single atom, immutable map
@@ -260,7 +251,7 @@
      (swap! state* assoc-in [:elicitation elicit-id]
             (cond-> {:message message
                      :mode mode
-                     :timestamp (current-timestamp)
+                     :timestamp (platform/now-ms)
                      :promise promise-atom}
               (= mode :form) (assoc :schema (:schema opts))
               (= mode :url) (assoc :url (:url opts))))
@@ -304,13 +295,13 @@
   Returns response map with :action and :content, or nil if timeout."
   [state* elicit-id & [timeout-ms]]
   (let [timeout (or timeout-ms 60000)
-        start-time (current-timestamp)
+        start-time (platform/now-ms)
         elicitation (get-in @state* [:elicitation elicit-id])
         promise-atom (:promise elicitation)]
     (loop []
       (if-let [response @promise-atom]
         response
-        (let [elapsed (- (current-timestamp) start-time)]
+        (let [elapsed (- (platform/now-ms) start-time)]
           (if (> elapsed timeout)
             nil  ; Timeout
             (do
@@ -520,7 +511,7 @@
     (swap! state* assoc-in [:sampling request-id]
            {:request request
             :status :pending
-            :timestamp (current-timestamp)})
+            :timestamp (platform/now-ms)})
     request-id))
 
 (defn send-sampling-request
@@ -577,7 +568,7 @@
   Returns response map, or nil if timeout."
   [state* request-id & [timeout-ms]]
   (let [timeout (or timeout-ms 60000)
-        start-time (current-timestamp)]
+        start-time (platform/now-ms)]
     #?(:clj
        (let [p (get-in @state* [:sampling request-id :promise])]
          (if p
@@ -586,7 +577,7 @@
        :cljs
        (loop []
          (let [entry (get-in @state* [:sampling request-id])
-               elapsed (- (current-timestamp) start-time)]
+               elapsed (- (platform/now-ms) start-time)]
            (cond
              (= :completed (:status entry))
              (:response entry)
@@ -705,7 +696,7 @@
     ;; Structured data -> TextContent with JSON
     :else
     [{:type "text"
-      :text (json/generate-string result)}]))
+      :text (platform/json-encode result)}]))
 
 ;; ============================================================================
 ;; MCP Method Handlers
@@ -784,7 +775,7 @@
         registry (:port-registry context)
         call-id (proto-util/generate-call-id)
         progress-token (get-in params [:_meta :progressToken])
-        start-time (current-timestamp)]
+        start-time (platform/now-ms)]
 
     (if (nil? tool-name)
       (do
@@ -802,7 +793,7 @@
                                      :error-message (str "Unknown tool: " tool-name)})
             {:error {:code -32602 :message (str "Unknown tool: " tool-name)}})
 
-          (try
+          (platform/try-any
             (register-operation state* call-id)
 
             ;; Check if cancelled before starting
@@ -828,9 +819,11 @@
                                              :progress-callback progress-callback
                                              :cancellation-check cancellation-check})
 
-                    ;; Execute the port
-                    result (core/port-execute port exec-context)
-                    duration-ms (- (current-timestamp) start-time)]
+                    ;; Execute the port. Unwrap any user-supplied async type
+                    ;; (promise/future/delay/manifold-deferred) back to a plain
+                    ;; value before formatting the response.
+                    result (platform/unwrap (core/port-execute port exec-context))
+                    duration-ms (- (platform/now-ms) start-time)]
 
                 ;; Check if cancelled during execution
                 (if (is-cancelled? state* call-id)
@@ -863,9 +856,9 @@
                                             (format-content (:result result)))}
                         (:metadata result) (assoc :metadata (:metadata result))))))))
 
-            (catch #?(:clj Exception :cljs js/Error) e
-              (let [duration-ms (- (current-timestamp) start-time)
-                    error-msg #?(:clj (.getMessage e) :cljs (.-message e))]
+            (catch-any e
+              (let [duration-ms (- (platform/now-ms) start-time)
+                    error-msg (platform/error-message e)]
                 (emit-event! :mcp/tool-call {:tool tool-name
                                              :call-id call-id
                                              :success? false
@@ -931,22 +924,22 @@
           (if-not (get-in (core/port-schema port) [:metadata :prompt])
             {:error {:code -32602 :message (str "Not a prompt: " prompt-name)}}
 
-            (try
+            (platform/try-any
               (let [exec-context (assoc context :params prompt-args)
-                    result (core/port-execute port exec-context)]
+                    ;; Unwrap any user-supplied async type before formatting.
+                    result (platform/unwrap (core/port-execute port exec-context))]
                 (if-let [err (:error result)]
                   {:error err}
                   ;; Prompts return messages array
                   {:messages (or (:messages result)
                                  [{:role "user"
                                    :content {:type "text"
-                                            :text (json/generate-string (:result result))}}])}))
+                                            :text (platform/json-encode (:result result))}}])}))
 
-              (catch #?(:clj Exception :cljs js/Error) e
+              (catch-any e
                 {:error {:code -32603
                          :message (str "Internal error: "
-                                       #?(:clj (.getMessage e)
-                                          :cljs (.-message e)))}}))))))))
+                                       (platform/error-message e))}}))))))))
 
 (defn handle-resources-list
   "Handle resources/list request with pagination.
@@ -1002,22 +995,22 @@
             (if-not (get-in (core/port-schema port) [:metadata :resource])
               {:error {:code -32602 :message (str "Not a resource: " uri)}}
 
-              (try
+              (platform/try-any
                 (let [exec-context (assoc context :params {:uri uri})
-                      result (core/port-execute port exec-context)]
+                      ;; Unwrap any user-supplied async type before formatting.
+                      result (platform/unwrap (core/port-execute port exec-context))]
                   (if-let [err (:error result)]
                     {:error err}
                     ;; Resources return contents array
                     {:contents (or (:contents result)
                                    [{:uri uri
                                      :mimeType "application/json"
-                                     :text (json/generate-string (:result result))}])}))
+                                     :text (platform/json-encode (:result result))}])}))
 
-                (catch #?(:clj Exception :cljs js/Error) e
+                (catch-any e
                   {:error {:code -32603
                            :message (str "Internal error: "
-                                         #?(:clj (.getMessage e)
-                                            :cljs (.-message e)))}})))))
+                                         (platform/error-message e))}})))))
 
         {:error {:code -32602 :message (str "Invalid resource URI: " uri)}}))))
 
@@ -1176,7 +1169,7 @@
           (let [port-schema (core/port-schema port)
                 completion-fn (get-in port-schema [:metadata :completions (keyword arg-name)])]
             (if completion-fn
-              (try
+              (platform/try-any
                 ;; Call completion function with partial value and context
                 (let [values (completion-fn arg-value prev-args)
                       ;; Ensure values is a vector of strings
@@ -1184,11 +1177,10 @@
                   {:completion {:values value-strs
                                 :total (count value-strs)
                                 :hasMore false}})
-                (catch #?(:clj Exception :cljs js/Error) e
+                (catch-any e
                   {:error {:code -32603
                            :message (str "Completion error: "
-                                         #?(:clj (.getMessage e)
-                                            :cljs (.-message e)))}}))
+                                         (platform/error-message e))}}))
               ;; No completion function defined
               {:completion {:values []
                             :total 0
@@ -1265,7 +1257,7 @@
           enriched-context (assoc (merge context adapter-opts)
                                  :state* state*)]
       (if handler
-        (try
+        (platform/try-any
           ;; Validate request ID if present
           (when-let [request-id (:id (:request enriched-context))]
             (when-not (validate-request-id state* request-id)
@@ -1276,11 +1268,10 @@
           ;; Call handler with enriched context
           (handler params enriched-context)
 
-          (catch #?(:clj Exception :cljs js/Error) e
+          (catch-any e
             {:error {:code -32603
                      :message (str "Internal error: "
-                                   #?(:clj (.getMessage e)
-                                      :cljs (.-message e)))}}))
+                                   (platform/error-message e))}}))
 
         ;; Unknown method
         {:error {:code -32601 :message (str "Method not found: " method)}}))))
@@ -1471,349 +1462,29 @@
 ;; MCP Client Implementation (ProtocolClient)
 ;; ============================================================================
 
-(def ^:private empty-client-state
-  "The shape of fresh client state."
-  {:request-id 0
-   :pending-requests {}
-   :request-handlers {}})
-
-(defn create-client-state
-  "Create a fresh client state atom. Each McpClient owns one."
-  []
-  (atom empty-client-state))
-
-(defn reset-client-state!
-  "Reset client state (for testing or reconnection)."
-  ([]
-   ;; No-op for backward compat — clients own their state now
-   nil)
-  ([client-state*]
-   (reset! client-state* empty-client-state)))
-
-(defn- generate-client-request-id
-  "Generate unique request ID for client requests."
-  [client-state*]
-  (-> (swap! client-state* update :request-id inc)
-      :request-id))
-
-(defn- handle-client-incoming-message
-  "Handle incoming message for client (responses or server-initiated requests).
-
-  For responses: Deliver to pending request promise.
-  For requests: Dispatch to registered handler."
-  [client-state* message]
-  (let [id (:id message)
-        method (:method message)]
-    (cond
-      ;; Response to our request (has id, no method)
-      (and id (not method))
-      (when-let [pending (get-in @client-state* [:pending-requests id])]
-        (let [promise-atom (:promise pending)]
-          (reset! promise-atom message)
-          (swap! client-state* update :pending-requests dissoc id)))
-
-      ;; Server-initiated request (has method)
-      method
-      (if-let [handler (get-in @client-state* [:request-handlers method])]
-        (try
-          (let [result (handler (:params message) {})]
-            ;; Return response if request (has id)
-            (when id
-              {:jsonrpc "2.0"
-               :id id
-               :result (:result result)}))
-          (catch #?(:clj Exception :cljs js/Error) e
-            (when id
-              {:jsonrpc "2.0"
-               :id id
-               :error {:code -32603
-                       :message (str "Handler error: "
-                                     #?(:clj (.getMessage e)
-                                        :cljs (.-message e)))}})))
-        ;; No handler registered
-        (when id
-          {:jsonrpc "2.0"
-           :id id
-           :error {:code -32601
-                   :message (str "Method not found: " method)}}))
-
-      ;; Notification (no id, has method) - already handled above
-      :else nil)))
-
-(defrecord McpClient [transport* client-info* server-info* capabilities* connected?* client-state* opts]
-  core/ProtocolClient
-
-  (protocol-connect [this transport client-info]
-    (reset! transport* transport)
-    (reset! client-info* client-info)
-
-    ;; Start transport with handler for incoming messages
-    (core/transport-start transport
-      (fn [message]
-        (let [parsed (if (string? message)
-                       (json/parse-string message true)
-                       message)]
-          (handle-client-incoming-message client-state* parsed))))
-
-    ;; Send initialize request
-    (let [request-id (generate-client-request-id client-state*)
-          capabilities (or (:capabilities opts)
-                          {:sampling {:tools {}}
-                           :roots {:listChanged false}
-                           :elicitation {:form {} :url {}}})
-          init-request {:jsonrpc "2.0"
-                        :id request-id
-                        :method "initialize"
-                        :params {:protocolVersion "2025-11-25"
-                                 :capabilities capabilities
-                                 :clientInfo client-info}}
-          promise-atom (atom nil)]
-
-      ;; Register pending request
-      (swap! client-state* assoc-in [:pending-requests request-id]
-             {:promise promise-atom
-              :method "initialize"
-              :timestamp (current-timestamp)})
-
-      ;; Send request
-      (core/transport-send transport
-        (json/generate-string init-request))
-
-      ;; Wait for response (with timeout)
-      (let [timeout-ms (or (:timeout-ms opts) 30000)
-            start-time (current-timestamp)]
-        (loop []
-          (if-let [response @promise-atom]
-            (if (:error response)
-              {:error (:error response)}
-              (do
-                (reset! server-info* (get-in response [:result :serverInfo]))
-                (reset! capabilities* (get-in response [:result :capabilities]))
-                (reset! connected?* true)
-                ;; Send initialized notification
-                (core/transport-send transport
-                  (json/generate-string {:jsonrpc "2.0"
-                                         :method "notifications/initialized"}))
-                {:result (:result response)}))
-            (let [elapsed (- (current-timestamp) start-time)]
-              (if (> elapsed timeout-ms)
-                {:error {:code -32000 :message "Connection timeout"}}
-                (do
-                  #?(:clj (Thread/sleep 10)
-                     :cljs (js/setTimeout #() 10))
-                  (recur)))))))))
-
-  (protocol-request [this method params]
-    (when-not @connected?*
-      (throw (ex-info "Client not connected" {:method method})))
-
-    (let [request-id (generate-client-request-id client-state*)
-          request {:jsonrpc "2.0"
-                   :id request-id
-                   :method method
-                   :params (or params {})}
-          promise-atom (atom nil)]
-
-      ;; Register pending request
-      (swap! client-state* assoc-in [:pending-requests request-id]
-             {:promise promise-atom
-              :method method
-              :timestamp (current-timestamp)})
-
-      ;; Send request
-      (core/transport-send @transport*
-        (json/generate-string request))
-
-      ;; Wait for response (with timeout)
-      (let [timeout-ms (or (:timeout-ms opts) 30000)
-            start-time (current-timestamp)]
-        (loop []
-          (if-let [response @promise-atom]
-            (if (:error response)
-              {:error (:error response)}
-              {:result (:result response)})
-            (let [elapsed (- (current-timestamp) start-time)]
-              (if (> elapsed timeout-ms)
-                (do
-                  (swap! client-state* update :pending-requests dissoc request-id)
-                  {:error {:code -32000 :message "Request timeout"}})
-                (do
-                  #?(:clj (Thread/sleep 10)
-                     :cljs (js/setTimeout #() 10))
-                  (recur)))))))))
-
-  (protocol-notify [this method params]
-    (when-not @connected?*
-      (throw (ex-info "Client not connected" {:method method})))
-
-    (core/transport-send @transport*
-      (json/generate-string {:jsonrpc "2.0"
-                             :method method
-                             :params (or params {})}))
-    nil)
-
-  (protocol-disconnect [this]
-    (when @connected?*
-      (reset! connected?* false)
-      (when-let [transport @transport*]
-        (core/transport-stop transport))
-      (reset! transport* nil)
-      (reset! server-info* nil)
-      (reset! capabilities* nil))
-    nil)
-
-  (register-request-handler! [this method handler]
-    (swap! client-state* assoc-in [:request-handlers method] handler)
-    nil))
-
-(defn create-mcp-client
-  "Create an MCP client instance.
-
-  Options:
-  - :capabilities - Client capabilities to declare (default: sampling, roots, elicitation)
-  - :timeout-ms - Request timeout in milliseconds (default: 30000)
-  - :handlers - Map of method -> handler for server-initiated requests
-
-  Returns an McpClient that implements ProtocolClient.
-
-  Example:
-    (def client (create-mcp-client
-                  {:capabilities {:sampling {:tools {}}
-                                  :roots {:listChanged true}}
-                   :handlers {\"sampling/createMessage\" my-sampling-handler}}))
-
-    ;; Connect to server
-    (protocol-connect client transport {:name \"my-app\" :version \"1.0\"})
-
-    ;; Call tools
-    (protocol-request client \"tools/list\" {})
-    (protocol-request client \"tools/call\" {:name \"search\" :arguments {:q \"foo\"}})
-
-    ;; Disconnect
-    (protocol-disconnect client)"
-  ([]
-   (create-mcp-client nil))
-  ([opts]
-   (let [client (->McpClient (atom nil)      ; transport*
-                             (atom nil)      ; client-info*
-                             (atom nil)      ; server-info*
-                             (atom nil)      ; capabilities*
-                             (atom false)    ; connected?*
-                             (create-client-state)  ; client-state*
-                             opts)]
-     ;; Register any provided handlers
-     (doseq [[method handler] (:handlers opts)]
-       (core/register-request-handler! client method handler))
-     client)))
 
 ;; ============================================================================
-;; Client Convenience Functions
+;; Client mode — not included
 ;; ============================================================================
-
-(defn client-list-tools
-  "List available tools from server.
-
-  Returns {:result {:tools [...] :nextCursor ...}} or {:error ...}"
-  ([client]
-   (client-list-tools client nil))
-  ([client cursor]
-   (core/protocol-request client "tools/list"
-     (when cursor {:cursor cursor}))))
-
-(defn client-call-tool
-  "Call a tool on the server.
-
-  Returns {:result {:content [...]}} or {:error ...}"
-  [client tool-name arguments]
-  (core/protocol-request client "tools/call"
-    {:name tool-name
-     :arguments (or arguments {})}))
-
-(defn client-list-prompts
-  "List available prompts from server.
-
-  Returns {:result {:prompts [...] :nextCursor ...}} or {:error ...}"
-  ([client]
-   (client-list-prompts client nil))
-  ([client cursor]
-   (core/protocol-request client "prompts/list"
-     (when cursor {:cursor cursor}))))
-
-(defn client-get-prompt
-  "Get a prompt from the server.
-
-  Returns {:result {:messages [...]}} or {:error ...}"
-  [client prompt-name arguments]
-  (core/protocol-request client "prompts/get"
-    {:name prompt-name
-     :arguments (or arguments {})}))
-
-(defn client-list-resources
-  "List available resources from server.
-
-  Returns {:result {:resources [...] :nextCursor ...}} or {:error ...}"
-  ([client]
-   (client-list-resources client nil))
-  ([client cursor]
-   (core/protocol-request client "resources/list"
-     (when cursor {:cursor cursor}))))
-
-(defn client-read-resource
-  "Read a resource from the server.
-
-  Returns {:result {:contents [...]}} or {:error ...}"
-  [client uri]
-  (core/protocol-request client "resources/read"
-    {:uri uri}))
-
-(defn client-subscribe-resource
-  "Subscribe to resource updates.
-
-  Returns {:result {}} or {:error ...}"
-  [client uri]
-  (core/protocol-request client "resources/subscribe"
-    {:uri uri}))
-
-(defn client-unsubscribe-resource
-  "Unsubscribe from resource updates.
-
-  Returns {:result {}} or {:error ...}"
-  [client uri]
-  (core/protocol-request client "resources/unsubscribe"
-    {:uri uri}))
-
-(defn client-ping
-  "Ping the server to check connection.
-
-  Returns {:result {}} or {:error ...}"
-  [client]
-  (core/protocol-request client "ping" {}))
-
-(defn client-set-log-level
-  "Set the minimum log level for server messages.
-
-  level - :debug, :info, :warning, or :error
-
-  Returns {:result {}} or {:error ...}"
-  [client level]
-  (core/protocol-request client "logging/setLevel"
-    {:level (name level)}))
-
-(defn client-server-info
-  "Get the connected server's info.
-
-  Returns server info map or nil if not connected."
-  [client]
-  @(:server-info* client))
-
-(defn client-server-capabilities
-  "Get the connected server's capabilities.
-
-  Returns capabilities map or nil if not connected."
-  [client]
-  @(:capabilities* client))
-
-(defn client-connected?
-  "Check if client is connected to a server."
-  [client]
-  @(:connected?* client))
+;;
+;; Defport does not ship an MCP client for "my program wants to talk to
+;; an external MCP server." That use case — spawning a subprocess MCP
+;; server and driving it from your Clojure code — is application concern,
+;; not library concern. Bring your own subprocess primitive (ProcessBuilder,
+;; babashka.process, Node child_process), your own transport, and your
+;; own concurrency model.
+;;
+;; What defport DOES provide for client-role needs:
+;;
+;;   - The defport.core/ProtocolClient protocol — the contract a client
+;;     must satisfy. Implement it for your own needs.
+;;
+;;   - Server-initiated request support inside defport.mcp/McpAdapter:
+;;     when running as a server, the adapter can send sampling/elicitation
+;;     requests TO its connected client using the existing transport.
+;;     See `send-sampling-request`, `create-elicitation`, etc. above.
+;;
+;; Everything else — McpClient record, create-mcp-client, and the
+;; client-list-tools / client-call-tool / etc. convenience wrappers —
+;; was removed. It's ~350 lines of untested speculative code that
+;; belongs in user applications if they need it.

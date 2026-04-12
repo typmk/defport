@@ -36,14 +36,14 @@
 ;; =============================================================================
 
 (defn pmap-batch
-  "Process batch with parallel map (Clojure's pmap).
+  "Process batch with parallel map (Clojure's pmap — JVM only).
 
   Uses Clojure's built-in pmap for simple parallelism. Good for CPU/IO-bound
   operations where you want concurrency without explicit control. No timeout
   support - operations run until completion.
 
-  Note: Results are realized eagerly (doall) to ensure all work completes
-  before returning.
+  On CLJS (Node/browser), there's no true parallelism — pmap doesn't exist.
+  Falls back to sequential processing on CLJS.
 
   Args:
     items - Collection of items to process
@@ -52,7 +52,8 @@
   Returns:
     Vector of results in same order as items."
   [items process-fn]
-  (vec (doall (pmap process-fn items))))
+  #?(:clj  (vec (doall (pmap process-fn items)))
+     :cljs (mapv process-fn items)))
 
 ;; =============================================================================
 ;; Strategy 3: Futures (Timeout Support)

@@ -32,7 +32,7 @@
      (if (exists? js/require)
        (let [fs (js/require "fs")
              content (.readFileSync fs path "utf8")]
-         (clojure.reader/read-string content))
+         (edn/read-string content))
        (throw (ex-info "File I/O not available in browser environment"
                       {:path path})))))
 

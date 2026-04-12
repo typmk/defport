@@ -180,6 +180,195 @@ A PortRegistry manages port registration and lookup.
 
 ---
 
+## Protocol Intersection
+
+Defport is the **intersection of MCP, LSP, and DAP** — the shared machinery that all three JSON-RPC-over-transport protocols need, exposed as reusable primitives.
+
+### What the three protocols share
+
+| Concern | MCP | LSP | DAP |
+|---------|-----|-----|-----|
+| Wire format | JSON-RPC 2.0 | JSON-RPC 2.0 | JSON-RPC 2.0 (DAP flavor) |
+| Transports | stdio, HTTP/SSE | stdio, TCP, IPC | stdio, TCP |
+| Request/response shape | `{id, method, params}` → `{id, result/error}` | same | same |
+| Capability negotiation | `initialize` handshake | `initialize` handshake | `initialize` request |
+| Cancellation | `tools/call/cancel` | `$/cancelRequest` | `cancel` request |
+| Progress notifications | `notifications/progress` | `$/progress` | `progress` event |
+| Error codes | JSON-RPC -32xxx | JSON-RPC -32xxx | JSON-RPC -32xxx |
+| Structured input schemas | JSON Schema | JSON Schema | JSON Schema |
+
+**Defport lives at this intersection.** It provides the JSON-RPC framing, the dispatch layer, the cancellation tracking, the progress hooks, the error mapping, and the state management — once — and each protocol adapter maps its specific methods (`tools/call`, `textDocument/hover`, `setBreakpoints`) to the same underlying port invocation.
+
+### What each protocol specializes
+
+- **MCP**: tools, prompts, resources, sampling, elicitation
+- **LSP**: textDocument/* and workspace/* operations, diagnostics, completions at cursor positions
+- **DAP**: launch/attach sessions, breakpoints, stepping, stack frame inspection
+
+These are adapter-level concerns — they map protocol-specific messages to port calls and format protocol-specific responses. The *plumbing* (dispatch, cancellation, state, content formatting) is shared in the core.
+
+### The payoff
+
+A single port definition can be exposed via all three protocols:
+
+```clojure
+(core/register-port! registry
+  {:id :find-definition
+   :handler find-definition-handler
+   :input-schema {...}})
+
+;; Exposed via MCP as a tool
+(mcp/expose-port! adapter :find-definition)
+
+;; Exposed via LSP as textDocument/definition
+(lsp/expose-port! adapter :find-definition :as "textDocument/definition")
+
+;; Exposed via DAP as a custom request
+(dap/expose-port! adapter :find-definition :as "customFindDefinition")
+```
+
+One capability, three protocols, one implementation. **This is why defport exists as a library distinct from any single protocol implementation.** If you only needed MCP, you'd use an MCP-specific library. Defport's value is the shared substrate.
+
+---
+
+## Concurrency Model
+
+Defport's concurrency philosophy is captured in one rule:
+
+> **Port handlers are synchronous. Users bring their own async.**
+
+This follows Ring exactly, and for the same reasons: a protocol adapter should not impose a concurrency model on its consumers. The handler contract is `(fn [context] result)` — a plain function from context to value. Whatever the handler does internally — blocking I/O, async I/O, spawning threads, parking go-blocks, awaiting promises — is invisible to defport.
+
+### Why synchronous-by-default is the right choice
+
+**The alternative would be picking an async primitive.** If defport chose core.async, every user would need core.async as a dependency and every handler would live inside a go-block. If defport chose promesa, same story. If defport chose manifold, it would be JVM-only. Each choice forces contagion onto users who didn't ask for it.
+
+Ring solved this in 2009 by refusing to pick. Ring handlers are `(fn [request] response)`. Users who want async handling return a manifold deferred; manifold-aware Ring adapters unwrap it. Users who want blocking handlers write blocking code. Users who want core.async call `<!!` inside their handler. Ring doesn't know or care. **That decision is why Ring is still the base of the Clojure web ecosystem 15 years later** — it stayed neutral while async fashions came and went.
+
+Defport applies the same principle to protocol adapters.
+
+### Deployment models, and what each implies
+
+#### Stdio: 1 process = 1 peer
+
+When an MCP/LSP/DAP client spawns a stdio server, the server process has exactly one peer connected via exactly one pair of stdin/stdout pipes. If ten clients want the same server, ten separate processes are spawned — each with its own private stdio, its own state, its own lifetime.
+
+```
+Client 1 → spawns → [server process #1]  (stdio to client 1)
+Client 2 → spawns → [server process #2]  (stdio to client 2)
+Client N → spawns → [server process #N]  (stdio to client N)
+```
+
+Under this model:
+- **No concurrency needed** inside the process — linear request/response loop
+- **No shared state** across clients — each has its own process
+- **No authentication** — the stdio pipe is authenticated by "you spawned me"
+- **No session management** — one process = one implicit session
+- **Crash isolation is free** — one client's process crashing doesn't touch others
+
+The whole stdio deployment model is inherently sequential. A synchronous request-loop is the correct implementation on any platform:
+
+```clojure
+;; Pseudocode — both JVM and Node versions look like this
+(loop []
+  (let [request  (read-stdin-line)
+        response (dispatch request)]
+    (write-stdout-line response)
+    (recur)))
+```
+
+No async primitives. No concurrency primitives. Straight-line code. **On Node this works because `process.stdin.on('data', ...)` callbacks run synchronously in their bodies — the event loop drives the loop, but the work inside the callback is plain function calls.**
+
+#### HTTP: 1 process = N peers
+
+When a server runs over HTTP (SSE or streamable HTTP), it's a long-running daemon that many clients connect to simultaneously. This is where *real* concurrency appears:
+
+```
+[server process]  ← HTTP:9876
+    ↑   ↑   ↑   ↑
+    └───┴───┴───┴── many concurrent clients
+```
+
+Now you care about:
+- Concurrent handler execution (slow tool calls shouldn't block fast ones)
+- Per-session state keyed by client ID / auth token
+- Authentication
+- Backpressure and rate limiting
+- Graceful shutdown across connections
+
+**But notice: none of these concerns belong to defport.** Defport's job is still "given one request, produce one response." The concurrency happens at the transport layer — http-kit manages a thread pool on JVM; Node's `http.createServer` drives an event loop on Node. Each request, once routed to defport, is a synchronous dispatch that returns a value. Whether ten of them are running on ten threads, or interleaved on an event loop, is invisible to defport's core.
+
+This is the Ring insight again: Ring handlers are synchronous; Jetty/http-kit/aleph manage concurrency around them. Users who want async can wrap their handler in `manifold.deferred/chain`. Defport works the same way.
+
+### Users bring their own async
+
+Defport provides one small extension point — the `Unwrappable` protocol (or equivalent) — to let handlers optionally return async types that get transparently unwrapped:
+
+```clojure
+;; A synchronous handler — 90% of the time
+(mcp/deftool search [query :- :string]
+  (db/query! "SELECT ..." [query]))
+
+;; A handler that returns a Clojure promise/future
+(mcp/deftool slow-op [input :- :string]
+  (future (expensive-computation input)))
+;; Defport derefs the future before wrapping the response.
+
+;; A handler that returns a manifold deferred (JVM)
+(mcp/deftool manifold-style [input :- :string]
+  (d/chain (fetch input) process))
+;; Defport unwraps via manifold if it's on the classpath.
+
+;; A handler that returns a js/Promise (Node/CLJS)
+(mcp/deftool promise-style [url :- :string]
+  (js/fetch url))
+;; Node transport chains .then before writing the response.
+
+;; A handler that returns a core.async channel
+(require '[clojure.core.async :as a])
+(mcp/deftool channel-style [input :- :string]
+  (let [ch (a/chan)]
+    (a/go (a/>! ch (compute input)))
+    ch))
+;; Defport takes first value from channel.
+```
+
+**Defport does not depend on manifold, promesa, or core.async.** It uses feature detection (`requiring-resolve`, `instance?`) to unwrap user-provided types if they're present. Users who don't use async libraries don't pay for them. Users who do, get transparent support without defport dictating which one.
+
+### Why no async primitive in defport's core
+
+There are three concrete reasons:
+
+**1. Async contagion.** If defport's handler contract required returning a channel or promise, every consumer would have to use that primitive. Handlers inside a Pedestal service using interceptors would need to convert. Handlers inside a Ring+manifold app would need to convert. Users doing ordinary blocking work would need to wrap everything in channel machinery. The tax is uniform and unavoidable.
+
+**2. Platform split on blocking semantics.** Every async primitive that supports both JVM and CLJS has an asymmetric blocking story. `core.async`'s `<!!` is JVM-only. `promesa`'s `await` is JVM-only. `manifold` is JVM-only entirely. There is no cross-platform primitive where "block until this resolves" works identically on both runtimes. Picking any of them would create a new cross-platform inconsistency to paper over.
+
+**3. It's not defport's problem.** Concurrency across requests belongs to the transport (which already uses threads on JVM and the event loop on Node). Concurrency within a request belongs to the user's handler (which can use whatever async library it likes). Defport is the thin layer between those two, and it needs no concurrency model of its own.
+
+### The server/client asymmetry
+
+One subtlety worth calling out: **server-side defport is fully synchronous and fully cross-platform. Client-side defport (spawning external MCP/LSP/DAP servers) inherently needs async on Node.**
+
+When defport is a *server*, it receives requests via a transport callback and produces responses synchronously. On both JVM (blocking I/O) and Node (event-callback-driven I/O), this works with straight-line code.
+
+When defport is a *client* — using `connect!` to spawn an external protocol server subprocess and wait for responses — it has to wait for I/O to arrive. On JVM this is `BufferedReader.readLine()`, which blocks a thread. On Node, there's no way to block-wait — you must use callbacks or promises. **This is the one place where the platform semantic gap is real**, and it's why the current `connect!` implementation is JVM-only.
+
+The client-side story is a separate, optional feature surface. When it's implemented for Node, it will necessarily use Node-native async primitives (callbacks or promises), but that async concern lives **entirely inside the client module**, not in the core port abstraction.
+
+### Summary
+
+| Concern | Who handles it? |
+|---------|-----------------|
+| Concurrency across requests | Transport (thread pool on JVM, event loop on Node) |
+| Concurrency within a request | User's handler (their choice of primitive) |
+| Async unwrapping (returning promise/channel/deferred) | Defport's `Unwrappable` extension point |
+| Authentication, session management, rate limiting | User's middleware/framework |
+| Blocking on client-side external server responses | Client module (JVM-only for now) |
+
+Defport's core is a **pure synchronous protocol adapter**. That's the feature, not the limitation.
+
+---
+
 ## MCP Adapter Architecture
 
 The MCP adapter is the most complete protocol implementation, serving as the reference for future adapters.
@@ -495,6 +684,48 @@ defport is 20% fewer lines for equivalent functionality, with more flexibility.
 ;; Bad: Classpath scanning
 (auto-discover-ports! "my.app.tools")
 ```
+
+### 6. Synchronous by Default
+
+```clojure
+;; Good: Plain function, user decides concurrency
+(mcp/deftool search [query :- :string]
+  (db/query! "SELECT ..." [query]))
+
+;; Bad: Forcing users into a specific async primitive
+(mcp/deftool search [query :- :string]
+  (go (<! (async-query query))))  ; defport shouldn't require core.async
+```
+
+Port handlers are `(fn [context] result)`. Defport calls them synchronously and wraps the return value as a protocol response. If a handler wants to do async work, it unwraps internally and returns a value — or returns an async type and defport unwraps via the `Unwrappable` extension point. **Never** require users to adopt a specific concurrency model.
+
+### 7. Users Bring Their Own Async
+
+```clojure
+;; Defport's dispatch layer is agnostic to async primitives.
+;; Any of these handler shapes work:
+
+;; Plain value
+(fn [ctx] {:results [...]})
+
+;; Clojure promise / future / delay
+(fn [ctx] (future (compute ctx)))
+
+;; Manifold deferred (JVM, if on classpath)
+(fn [ctx] (d/chain (fetch ctx) process))
+
+;; core.async channel (on either platform)
+(fn [ctx] (go (<! (async-op ctx))))
+
+;; js/Promise (CLJS/Node)
+(fn [ctx] (js/fetch (:url ctx)))
+```
+
+Defport's dispatch layer detects and unwraps these via feature detection — no hard dependency on any async library. Users on Pedestal use interceptors; users on Ring use middleware; users on manifold use chains; users who like blocking use blocking. Defport composes with all of them because it refuses to pick one.
+
+### 8. Protocol Intersection, Not Union
+
+A port is defined once and exposed through any or all supported protocols. Defport holds the intersection of MCP, LSP, and DAP — the JSON-RPC framing, the dispatch, the cancellation, the state, the content formatting — as shared primitives. Protocol-specific concerns (MCP tools vs LSP document operations vs DAP breakpoints) live in their respective adapters as thin mappings over the shared core. The library's value is this shared substrate; single-protocol libraries miss the payoff.
 
 ---
 

@@ -133,15 +133,24 @@
 (defprotocol ProtocolClient
   "Client-side protocol operations for bidirectional communication.
 
-  Enables building protocol clients that:
+  Defines the contract for a protocol client — the other side of a
+  ProtocolAdapter. A ProtocolClient can:
   - Send requests to servers (tools/call, resources/read, etc.)
   - Handle incoming requests from servers (sampling, elicitation, roots)
   - Manage session state (initialize handshake, capabilities)
 
-  Example usage:
-    (def client (create-mcp-client transport))
-    (protocol-connect client {:name \"my-client\" :version \"1.0\"})
-    (protocol-request client \"tools/call\" {:name \"search\" :arguments {:q \"foo\"}})"
+  NOTE: Defport does NOT ship a ProtocolClient implementation. Spawning
+  and driving an external protocol server is application concern, not
+  library concern (the same way clj-http is separate from Ring). If your
+  application needs client-role capability:
+
+    1. Spawn the subprocess yourself (ProcessBuilder, babashka.process,
+       child_process in CLJS, whatever fits your stack).
+    2. Implement this protocol for your client record.
+    3. Use your own transport and concurrency model.
+
+  This protocol exists as a contract that external implementations can
+  satisfy, not as something defport provides."
 
   (protocol-connect [this transport client-info]
     "Connect to a server and perform initialization handshake.
@@ -226,70 +235,6 @@
 
     Returns the registered Port."))
 
-;;; Server API
-
-(defn create-server
-  "Create a protocol server with flexible configuration.
-
-  Options map:
-
-  **Protocol Configuration:**
-  - :protocol - Protocol adapter or keyword (:mcp, :lsp, :dap, :custom)
-  - :protocol-config - Path to protocol EDN file or config map
-  - :protocols - Vector of multiple protocols (for multi-protocol servers)
-
-  **Transport Configuration:**
-  - :transport - Transport or keyword (:stdio, :http, :websocket)
-  - :transport-config - Transport configuration map
-  - :transports - Vector of multiple transports
-
-  **Port/Tool Configuration:**
-  - :port-registry - PortRegistry implementation or keyword (:edn, :function, :hybrid)
-  - :ports - EDN file path or vector of port definitions
-  - :port-config - Additional port configuration
-
-  **Dispatch Configuration:**
-  - :dispatch - Dispatch strategy (:pipeline, :function, :multimethod)
-  - :dispatch-config - Dispatch configuration (pipeline stages, etc.)
-
-  **Lifecycle Hooks:**
-  - :on-initialize - Function called on first request: (fn [context] -> updated-context)
-  - :on-shutdown - Function called on server shutdown: (fn [context] -> nil)
-
-  **Feature Toggles:**
-  - :enable-progress - Enable progress notifications (default true)
-  - :enable-cancellation - Enable operation cancellation (default true)
-  - :enable-pagination - Enable cursor pagination (default true)
-
-  **System State:**
-  - :system - System state map (database, config, etc.)
-
-  Returns a server instance (map) that can be started with start!."
-  [options]
-  ;; Implementation in defport.server namespace
-  (throw (ex-info "Not yet implemented - see defport.server namespace"
-                  {:options options})))
-
-(defn start!
-  "Start a protocol server.
-
-  server - Server instance returned by create-server
-
-  Returns the started server (with updated state)."
-  [server]
-  (throw (ex-info "Not yet implemented - see defport.server namespace"
-                  {:server server})))
-
-(defn stop!
-  "Stop a protocol server and release resources.
-
-  server - Running server instance
-
-  Returns nil."
-  [server]
-  (throw (ex-info "Not yet implemented - see defport.server namespace"
-                  {:server server})))
-
 ;;; Utility Functions
 
 (defn port?
@@ -316,55 +261,6 @@
   "Check if x implements the ProtocolClient protocol."
   [x]
   (satisfies? ProtocolClient x))
-
-;;; Client API
-
-(defn create-client
-  "Create a protocol client with flexible configuration.
-
-  Options map:
-
-  **Protocol Configuration:**
-  - :protocol - Protocol keyword (:mcp, :lsp, :dap) or adapter instance
-  - :protocol-version - Protocol version to request (default: latest)
-
-  **Transport Configuration:**
-  - :transport - Transport instance or keyword (:stdio, :http)
-  - :transport-config - Transport configuration map
-    - For :http: {:url \"http://localhost:8080\"}
-    - For :stdio: {:command \"server-cmd\" :args [...]}
-
-  **Client Identity:**
-  - :client-info - Client identification {:name \"...\" :version \"...\" :description \"...\"}
-
-  **Client Capabilities:**
-  - :capabilities - Client capabilities to declare
-    - :sampling - Can handle sampling requests {:tools {}}
-    - :roots - Can provide filesystem roots {:listChanged true}
-    - :elicitation - Can handle elicitation {:form {} :url {}}
-
-  **Request Handlers (for server-initiated requests):**
-  - :handlers - Map of method -> handler function
-    - \"sampling/createMessage\" - Handle LLM requests
-    - \"elicitation/create\" - Handle user input requests
-    - \"roots/list\" - Provide filesystem roots
-
-  Returns a client instance that can be used with protocol-connect.
-
-  Example:
-    (def client (create-client
-                  {:protocol :mcp
-                   :transport :http
-                   :transport-config {:url \"http://localhost:9876\"}
-                   :client-info {:name \"my-app\" :version \"1.0.0\"}
-                   :capabilities {:sampling {:tools {}}
-                                  :roots {:listChanged true}}
-                   :handlers {\"sampling/createMessage\" my-sampling-handler
-                              \"roots/list\" (fn [_ _] {:roots @my-roots})}}))"
-  [options]
-  ;; Implementation in protocol-specific namespaces
-  (throw (ex-info "Use protocol-specific create function (e.g., mcp/create-client)"
-                  {:options options})))
 
 ;;; ============================================================================
 ;;; Cross-Protocol Registry
