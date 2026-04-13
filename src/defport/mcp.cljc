@@ -51,6 +51,7 @@
                (when (and (map? e) (:event e))
                  (record-metric! e))))"
   (:require [defport.core :as core]
+            [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]
             [defport.util.protocol :as proto-util]
             [defport.util.pagination :as pagination]
@@ -1488,3 +1489,162 @@
 ;; client-list-tools / client-call-tool / etc. convenience wrappers —
 ;; was removed. It's ~350 lines of untested speculative code that
 ;; belongs in user applications if they need it.
+
+;; ============================================================================
+;; Progressive-disclosure DSL — deftool / defprompt / defresource
+;; ============================================================================
+;;
+;; Thin wrappers around `defport.sugar/define-port` that stamp the
+;; right MCP metadata. The underlying machinery (param parsing, schema
+;; generation, handler wrapping, registry registration) lives in
+;; defport.sugar.
+;;
+;; Usage:
+;;   (require '[defport.mcp :refer [deftool defprompt defresource run!]])
+;;
+;;   (deftool greet
+;;     "Greet a user by name."
+;;     [name :- :string]
+;;     {:greeting (str "Hi, " name)})
+;;
+;;   (run! {:server-info {:name "my-server" :version "1.0"}
+;;          :transport :stdio})
+
+(defn- parse-mcp-macro-args
+  "Parse arguments for deftool / defprompt / defresource.
+
+  Accepts two orders, both common in existing defport code:
+
+    Clojure-style (doc first):
+      (deftool name doc? options? params body...)
+
+    Classic MCP-style (params first):
+      (deftool name options? params doc? body...)
+
+  Returns [doc options params body] for emitting a define-port call."
+  [args]
+  ;; First, pull off an optional leading docstring.
+  (let [[doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        ;; Optional options map.
+        [opts args] (if (and (map? (first args))
+                              ;; Don't confuse metadata (namespaced keys) with options.
+                              (not (some #(and (keyword? %) (namespace %))
+                                         (keys (first args)))))
+                      [(first args) (rest args)]
+                      [nil args])
+        ;; Params vector (required).
+        [params args] [(first args) (rest args)]
+        ;; If doc wasn't at the front, it may be between params and body
+        ;; (the classic MCP convention).
+        [doc body] (if (and (nil? doc) (string? (first args)))
+                     [(first args) (rest args)]
+                     [doc args])]
+    [doc opts params body]))
+
+(defmacro deftool
+  "Define an MCP tool.
+
+  Usage:
+    (deftool add [a :- :int b :- :int]
+      \"Add two numbers\"
+      (+ a b))
+
+  With context injection:
+    (deftool process [uri :- :string ctx :- :context]
+      \"Process a URI\"
+      (log ctx :info \"Working...\")
+      ...)
+
+  With options:
+    (deftool add {:tags #{:math}}
+      [a :- :int b :- :int]
+      \"Add numbers\"
+      (+ a b))
+
+  With Malli schema:
+    (deftool search [:map [:query :string] [:limit {:optional true} :int]]
+      \"Search code\"
+      (do-search query limit))"
+  [tool-name & args]
+  (let [[doc opts params body] (parse-mcp-macro-args args)]
+    `(sugar/define-port ~tool-name
+       ~@(when doc [doc])
+       ~@(when opts [opts])
+       {:mcp/tool true}
+       ~params
+       ~@body)))
+
+(defmacro defprompt
+  "Define an MCP prompt.
+
+  Usage:
+    (defprompt summarize [text :- :string]
+      \"Summarization prompt\"
+      [{:role \"user\"
+        :content {:type \"text\" :text (str \"Summarize: \" text)}}])"
+  [prompt-name & args]
+  (let [[doc opts params body] (parse-mcp-macro-args args)]
+    `(sugar/define-port ~prompt-name
+       ~@(when doc [doc])
+       ~@(when opts [opts])
+       {:mcp/prompt true}
+       ~params
+       ~@body)))
+
+(defmacro defresource
+  "Define an MCP resource.
+
+  Usage:
+    (defresource schema
+      \"Current database schema\"
+      {:mime-type \"application/edn\"}
+      []
+      (get-current-schema))"
+  [resource-name & args]
+  (let [[doc opts params body] (parse-mcp-macro-args args)]
+    `(sugar/define-port ~resource-name
+       ~@(when doc [doc])
+       ~@(when opts [opts])
+       {:mcp/resource true}
+       ~(or params [])
+       ~@body)))
+
+;; ============================================================================
+;; Adapter multimethod registration
+;; ============================================================================
+
+(defmethod sugar/create-adapter :mcp
+  [_protocol opts]
+  (create-mcp-adapter opts))
+
+;; ============================================================================
+;; Top-level run! convenience
+;; ============================================================================
+
+(defn run!
+  "Start an MCP server on the given transport.
+
+  Opts:
+    :server-info - {:name ... :version ...} (default: derived from main ns)
+    :transport   - :stdio (default), :http, or a pre-built Transport
+    :port        - HTTP port (for :http transport, default 8080)
+    :registry    - PortRegistry instance (default: defport.sugar/*registry*)
+
+  Ports registered via deftool / defprompt / defresource (or via
+  sugar/define-port with {:mcp/*} metadata) are exposed via this server.
+
+  For multi-adapter scenarios (MCP + LSP + DAP in one process), skip
+  this and instantiate adapters/transports directly against a shared
+  registry.
+
+  Returns a map {:adapter ... :transport ... :registry ...} that can
+  be passed to stop! to tear down."
+  [opts]
+  (sugar/run! (assoc opts :protocol :mcp)))
+
+(defn stop!
+  "Stop an MCP server started with run!.
+
+  Pass the map returned by run!. Idempotent."
+  [server]
+  (sugar/stop! server))

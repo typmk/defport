@@ -1,14 +1,37 @@
 (ns defport.sugar
-  "Shared infrastructure for protocol-specific sugar APIs (MCP, LSP, etc.).
+  "Shared DSL infrastructure for all defport protocol adapters.
 
-   Provides:
-   - State management atoms
-   - Context protocol base
-   - Parameter parsing
-   - Transport lifecycle
-   - Introspection helpers
-   - Type/schema conversion"
+   This namespace provides one underlying macro (`define-port`) plus the
+   orchestration primitives (`*registry*`, `create-adapter` multimethod,
+   `run!`, `stop!`). Each protocol adapter (defport.mcp, defport.lsp,
+   defport.dap) builds its thin protocol-specific macros
+   (deftool / deflsp / defcommand) on top of these.
+
+   The split is:
+
+     - defport.sugar      — ONE `define-port` macro, parses typed
+                            params, builds a handler, registers a
+                            port with metadata. Platform-agnostic.
+     - defport.mcp        — `deftool`, `defprompt`, `defresource`,
+                            `defserver`, `run!` — MCP-specific thin
+                            wrappers + MCP adapter implementation.
+     - defport.lsp        — `deflsp`, `defhandler`, `run!` — LSP wrappers.
+     - defport.dap        — `defdap`, `defcommand`, `run!` — DAP wrappers.
+
+   A port can carry metadata for multiple protocols, letting one
+   definition surface on multiple adapters:
+
+     (define-port find-definition
+       \"Find the definition of a symbol.\"
+       {:mcp/tool true
+        :lsp/method \"textDocument/definition\"}
+       [name :- :string]
+       (graph/find-definition name))
+
+   Adapters read their own metadata key at port-list time and expose
+   only the ports that opt into that protocol."
   (:require [defport.core :as core]
+            [defport.registry :as registry]
             [defport.transports.stdio :as stdio-transport]
             [defport.transports.http :as http-transport]
             [defport.util.platform :as platform]))
@@ -287,3 +310,219 @@
 (def uuid platform/uuid)
 (def now-ms platform/now-ms)
 (def eprintln platform/eprintln)
+
+;; ============================================================================
+;; Unified port definition — the heart of the DSL
+;; ============================================================================
+;;
+;; One `define-port` macro covers every protocol. Protocol-specific
+;; macros (deftool, deflsp, defcommand) are thin wrappers that call
+;; `define-port` with the right metadata.
+
+(def ^:dynamic *registry*
+  "Default port registry used by define-port and protocol-specific
+  macros. A fresh FunctionPortRegistry by default. Rebind with
+  `binding` for test isolation or multi-server scenarios.
+
+  (binding [*registry* (registry/create-function-registry)]
+    (deftool my-tool [x :- :int] (+ x 1))
+    (run! {:protocol :mcp :transport :stdio}))"
+  (registry/create-function-registry))
+
+(defn parse-define-port-args
+  "Parse the flexible argument shape that `define-port` and its
+  protocol-specific wrappers accept:
+
+    (define-port name metadata params body...)
+    (define-port name doc metadata params body...)
+    (define-port name options-map metadata params body...)
+    (define-port name doc options-map metadata params body...)
+
+  Returns {:name :doc :metadata :params :body}."
+  [name args]
+  (let [[doc args]   (if (string? (first args)) [(first args) (rest args)] [nil args])
+        [opts args]  (if (and (map? (first args))
+                               ;; Distinguish options map (has no protocol ns keys)
+                               ;; from metadata map (has at least one protocol ns key)
+                               (not (some #(and (keyword? %) (namespace %)) (keys (first args)))))
+                       [(first args) (rest args)]
+                       [{} args])
+        [metadata args] (if (map? (first args))
+                          [(first args) (rest args)]
+                          [{} args])
+        [params body]   [(first args) (rest args)]]
+    {:name name
+     :doc doc
+     :options opts
+     :metadata metadata
+     :params params
+     :body body}))
+
+(defn build-schema-form
+  "Build the schema quotation for a params form. Handles two shapes:
+   - Type-annotated vector: [x :- :int y :- :string]
+   - Malli schema: [:map [:x :int] [:y :string]]
+   - Nil/empty: empty object schema
+
+   Returns either a literal schema map (computed at macroexpansion time)
+   or a quoted form that will be evaluated at runtime in the caller's
+   namespace. Any symbols in quoted forms are fully qualified to this
+   namespace so callers don't need any specific require alias."
+  [params]
+  (cond
+    (nil? params)    {:type "object" :properties {} :required []}
+
+    (and (vector? params)
+         (keyword? (first params))
+         (#{:map :vector :string :int :boolean} (first params)))
+    `(defport.sugar/malli->json-schema '~params)
+
+    (vector? params)
+    (params->json-schema (parse-params params))
+
+    :else {:type "object"}))
+
+(defn extract-param-names
+  "Extract the parameter symbol names from a params form.
+   Returns a vector of symbols, or [] if no destructuring is needed."
+  [params]
+  (cond
+    (nil? params) []
+    (keyword? params) []
+    (and (vector? params)
+         (keyword? (first params))
+         (= :map (first params)))
+    ;; Malli :map schema — extract keys
+    (vec (keep #(when (vector? %) (first %)) (rest params)))
+
+    (vector? params)
+    (mapv :name (:params (parse-params params)))
+
+    :else []))
+
+(defn extract-context-sym
+  "If the params form requests context injection via [name :- :context]
+   or [name :- :ctx], return that symbol; else nil."
+  [params]
+  (when (and (vector? params)
+             (or (not (keyword? (first params)))
+                 (= :- (second params))))
+    (:context-name (parse-params params))))
+
+(defmacro define-port
+  "Define a port — a protocol-agnostic capability definition.
+
+  A port is a named handler with:
+    - an input schema (generated from the params form)
+    - a protocol-specific metadata map (stamps which protocols expose it)
+    - a body that runs when the handler is invoked
+
+  Usage:
+
+    (define-port greet
+      \"Greet a user by name.\"
+      {:mcp/tool true}
+      [name :- :string]
+      {:greeting (str \"Hi, \" name)})
+
+  Metadata keys are per-protocol. A port with {:mcp/tool true} is
+  exposed as an MCP tool. A port with {:lsp/method \"textDocument/hover\"}
+  is exposed as an LSP method. A port with both surfaces on both.
+
+  The body receives local bindings for each named parameter. To also
+  receive the full request context, add a `ctx :- :context` parameter:
+
+    (define-port process
+      {:mcp/tool true}
+      [uri :- :string ctx :- :context]
+      (some-fn-using-ctx ctx uri))
+
+  The port is registered into *registry*. Rebind with `binding` for
+  test isolation or to register into a specific registry."
+  [port-name & args]
+  (let [{:keys [doc options metadata params body]} (parse-define-port-args port-name args)
+        pnames (extract-param-names params)
+        ctx-name (extract-context-sym params)
+        schema-form (build-schema-form params)
+        params-sym (gensym "params__")
+        ctx-sym (gensym "context__")]
+    `(let [handler# (fn [~ctx-sym]
+                      (let [~params-sym (:params ~ctx-sym)
+                            ~@(when ctx-name [ctx-name ctx-sym])
+                            ~@(mapcat (fn [n]
+                                        [n `(get ~params-sym ~(keyword (clojure.core/name n)))])
+                                      pnames)]
+                        (do ~@body)))
+           port# {:id ~(keyword (clojure.core/name port-name))
+                  :name ~(clojure.core/name port-name)
+                  :description ~(or doc "")
+                  :input-schema ~schema-form
+                  :handler handler#
+                  :metadata (merge ~metadata ~options)}]
+       (defport.core/register-port! defport.sugar/*registry* port#)
+       port#)))
+
+;; ============================================================================
+;; Adapter + Transport orchestration (multimethod)
+;; ============================================================================
+
+(defmulti create-adapter
+  "Create a protocol adapter. Each protocol (:mcp, :lsp, :dap) registers
+   a method. `opts` typically includes :server-info and any
+   protocol-specific options.
+
+   Usage:
+     (create-adapter :mcp {:server-info {:name \"my-server\"}})"
+  (fn [protocol _opts] protocol))
+
+(defmethod create-adapter :default [protocol _opts]
+  (throw (ex-info (str "No adapter registered for protocol: " protocol
+                       ". Require defport.mcp, defport.lsp, or defport.dap "
+                       "to register the appropriate adapter.")
+                  {:protocol protocol})))
+
+(defn run!
+  "Start a server speaking one protocol on one transport.
+
+  Opts:
+    :protocol    - :mcp, :lsp, or :dap (required)
+    :transport   - :stdio, :http, or a pre-built Transport (default :stdio)
+    :port        - HTTP port (for :http transport, default 8080)
+    :server-info - {:name ... :version ...} (passed to the adapter)
+    :registry    - PortRegistry instance (default: *registry*)
+
+  For multi-protocol servers, instantiate adapters and transports
+  directly; this convenience is for the single-protocol common case.
+
+  Returns a map {:adapter ... :transport ... :registry ...} so
+  callers can stop! it later."
+  [{:keys [protocol transport port server-info registry]
+    :or   {transport :stdio port 8080}
+    :as   opts}]
+  (when-not protocol
+    (throw (ex-info "run! requires :protocol" {:opts opts})))
+  (let [registry (or registry *registry*)
+        adapter  (create-adapter protocol (assoc opts :server-info server-info))
+        handler  (fn [request]
+                   (core/protocol-dispatch adapter
+                                           (:method request)
+                                           (:params request)
+                                           {:port-registry registry
+                                            :transport nil
+                                            :request request}))
+        t        (cond
+                   (satisfies? core/Transport transport) transport
+                   (= transport :stdio) (stdio-transport/create-stdio-transport)
+                   (= transport :http)  (http-transport/create-http-transport {:port port})
+                   :else (throw (ex-info "Unknown transport type" {:transport transport})))]
+    (core/transport-start t handler)
+    {:adapter adapter :transport t :registry registry :protocol protocol}))
+
+(defn stop!
+  "Stop a server started with run!.
+
+  Takes the map returned by run!. Idempotent — safe to call multiple times."
+  [{:keys [transport]}]
+  (when transport
+    (core/transport-stop transport))
+  nil)

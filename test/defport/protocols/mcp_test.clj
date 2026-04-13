@@ -522,6 +522,87 @@
       (is (map? (get-in result [:capabilities :logging]))))))
 
 ;; ============================================================================
+;; MCP Sugar DSL — deftool / defprompt / defresource
+;; ============================================================================
+;;
+;; Exercises the thin protocol-specific macros that wrap
+;; defport.sugar/define-port. Verifies that:
+;;   - Port registration happens into *registry*
+;;   - Metadata is stamped correctly (:mcp/tool, :mcp/prompt, :mcp/resource)
+;;   - Handler wrapping preserves parameter binding + context injection
+;;   - Ports dispatch via adapter / protocol-dispatch end-to-end
+
+(deftest test-deftool-registration
+  (testing "deftool registers a port with :mcp/tool metadata"
+    (let [reg (registry/create-function-registry)]
+      (binding [defport.sugar/*registry* reg]
+        (mcp/deftool my-adder
+          "Add two numbers"
+          [a :- :int b :- :int]
+          (+ a b)))
+      (let [port-def (first (core/list-ports reg))]
+        (is (some? port-def))
+        (is (= :my-adder (:id port-def)))
+        (is (= "Add two numbers" (:description port-def)))
+        (is (= true (get-in port-def [:metadata :mcp/tool])))))))
+
+(deftest test-deftool-handler-execution
+  (testing "deftool handler runs via protocol-dispatch end-to-end"
+    (let [reg (registry/create-function-registry)
+          _ (binding [defport.sugar/*registry* reg]
+              (mcp/deftool my-adder
+                "Add two numbers"
+                [a :- :int b :- :int]
+                (+ a b)))
+          adapter (mcp/create-mcp-adapter)
+          result (core/protocol-dispatch adapter "tools/call"
+                   {:name "my-adder" :arguments {:a 2 :b 3}}
+                   {:port-registry reg})]
+      (is (nil? (:error result)))
+      (is (vector? (:content result))))))
+
+(deftest test-defprompt-registration
+  (testing "defprompt registers with :mcp/prompt metadata"
+    (let [reg (registry/create-function-registry)]
+      (binding [defport.sugar/*registry* reg]
+        (mcp/defprompt summarize
+          "Ask for a summary"
+          [text :- :string]
+          {:messages [{:role "user"
+                       :content {:type "text" :text (str "Summarize: " text)}}]}))
+      (let [port-def (first (core/list-ports reg))]
+        (is (= :summarize (:id port-def)))
+        (is (= true (get-in port-def [:metadata :mcp/prompt])))))))
+
+(deftest test-defresource-registration
+  (testing "defresource registers with :mcp/resource metadata"
+    (let [reg (registry/create-function-registry)]
+      (binding [defport.sugar/*registry* reg]
+        (mcp/defresource db-schema
+          "Current database schema"
+          {:mime-type "application/edn"}
+          []
+          {:tables ["users" "posts"]}))
+      (let [port-def (first (core/list-ports reg))]
+        (is (= :db-schema (:id port-def)))
+        (is (= true (get-in port-def [:metadata :mcp/resource])))
+        (is (= "application/edn" (get-in port-def [:metadata :mime-type])))))))
+
+(deftest test-deftool-with-options
+  (testing "options map merges into metadata"
+    (let [reg (registry/create-function-registry)]
+      (binding [defport.sugar/*registry* reg]
+        (mcp/deftool search
+          {:tags #{:query} :dangerous true}
+          [q :- :string]
+          "Search for something"
+          [{:match q}]))
+      (let [port-def (first (core/list-ports reg))]
+        (is (= #{:query} (get-in port-def [:metadata :tags])))
+        (is (= true (get-in port-def [:metadata :dangerous])))
+        (is (= true (get-in port-def [:metadata :mcp/tool])))))))
+
+;; ============================================================================
 ;; Synchronous Contract: Handler Return Types
 ;; ============================================================================
 ;;
