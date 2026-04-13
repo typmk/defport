@@ -105,32 +105,145 @@ Multi-server-per-process works correctly.
 ## Phase 8: LSP/DAP Server Hardening 🔮
 
 **Priority:** Medium. The MCP story is solid. LSP and DAP server adapters
-exist but haven't been validated end-to-end against real clients.
+exist but were audited 2026-04-12 and found at substantially different
+readiness levels. See "Audit findings" below for coverage tables.
 
-### 8.1 Real LSP test coverage
+### Audit findings (2026-04-12)
 
-- Integration tests against `clojure-lsp` as the client — verify
-  defport's LSP adapter can serve hover, completion, definition,
-  references against a real editor
-- Document test suite: spawn an editor or simulated LSP client, run
-  workflows
-- Fix bugs surfaced by real usage
+**LSP adapter (`defport/lsp.cljc`, 1499 LOC):** ~15% implemented, ~37%
+stubbed (declared, no server handler), ~48% missing. Zero LSP tests exist.
 
-### 8.2 Real DAP test coverage
+- Works: `initialize`, `initialized`, `shutdown`, `exit`,
+  `didOpen/didChange/didClose`, `ProtocolAdapter` contract, port metadata
+  routing via `:metadata {:lsp {:method ...}}`
+- Stubbed (declared, no server handler): `hover`, `definition`,
+  `references`, `documentSymbol`, `completion`, `codeAction`, `rename`,
+  `formatting`, `workspace/symbol`, `$/cancelRequest`, `$/progress`,
+  `didSave`. Client-side helpers exist but only format outgoing params;
+  server never responds.
+- Missing entirely: `typeDefinition`, `implementation`, `signatureHelp`,
+  `prepareRename`, pull `diagnostic`, `semanticTokens`, `foldingRange`,
+  `workspace/applyEdit`, `executeCommand`, `window/*`
+- **Load-bearing gap**: LSP's state atom is `{:initialized false}` only.
+  MCP's has 140+ lines of cancellation/progress/subscription machinery.
+  `$/cancelRequest` and `$/progress` cannot work until that infrastructure
+  is ported across.
 
-- Currently only REPL-mode breakpoint/stepping stubs are tested.
-  Real DAP needs to work against an actual debug UI (VS Code, or
-  a scripted test harness that speaks DAP)
-- Validate session lifecycle, breakpoint verification, stack frame
-  inspection
+**DAP adapter (`defport/dap.cljc`, 943 LOC):** 13 implemented, 6 partial,
+28 stubbed, 5 missing events. 442 LOC of isolation tests exist.
 
-### 8.3 Cross-protocol port routing
+- Works: full lifecycle (`initialize`/`launch`/`attach`/
+  `configurationDone`/`disconnect`/`terminate`), `setBreakpoints` with
+  state storage and verified status, `continue`, `scopes`, `variables`,
+  `evaluate` with port-registry integration, `completions`, message
+  codecs, emitted events (`stopped`, `continued`, `terminated`, `output`,
+  `breakpoint`)
+- Hardcoded stubs: `threads` returns one-frame placeholder, `stackTrace`
+  returns empty, `source`/`loadedSources`/`modules` return empty
+- Unsupported: `next`, `stepIn`, `stepOut`, `stepBack`, `reverseContinue`,
+  `pause`, `goto`, `setVariable`, `setExpression`
+- Missing events: `exited`, `thread`, `module`, `process`
+- Backend flags (`:nrepl`, `:flowstorm`, `:jdi`) affect capability
+  reporting only; no backend integration code exists
+- **Scope clarification**: the stepping/stackTrace/threads stubs only
+  become real when a debug backend drives them, and **backends live in
+  consumer code, not defport**. The defport-side DAP adapter is ~4 days
+  from honest done (stackTrace plumbing, missing events, polish).
 
-The four Port/Transport/ProtocolAdapter/PortRegistry abstractions
-were designed so one port definition could be exposed via all three
-protocols. Today this is aspirational — there's no example showing
-a single port definition serving MCP tools AND LSP commands AND DAP
-requests. Build it, document it, or remove it from the design claims.
+### 8.1 LSP core-features pass (~1 week)
+
+- Port cancellation/progress state machinery from MCP (prerequisite for
+  `$/cancelRequest` and `$/progress`)
+- Implement default server handlers for `hover`, `definition`,
+  `references`, `documentSymbol`, `rename` that route through port
+  metadata
+- Add `didSave` handling
+- First real LSP test file — adapter in isolation, no real editor
+  required. Integration tests against a real editor can come later in
+  user code.
+
+### 8.2 DAP adapter honest-done pass (~4 days)
+
+- Port cancellation/progress state pattern from MCP
+- `stackTrace` plumbing — proper frame structure, source/line/column,
+  so consumer-side backends can fill it in
+- Emit missing events: `exited`, `thread`, `module`, `process`
+- Additional tests for the new plumbing
+
+**Not in scope for defport**: nREPL/FlowStorm/JDI backend integration.
+That's 2+ weeks of consumer-side work and belongs wherever the consumer
+(defnet) spawns or attaches to debuggers.
+
+### 8.3 Multi-adapter composition example
+
+The Port/Transport/ProtocolAdapter/PortRegistry abstractions already
+compose: a consumer instantiates multiple adapters against a single
+registry and runs them together. **This is a pattern, not a feature** —
+defport does not ship a "cross-protocol router" or a capability layer.
+The work here is to *document and demonstrate* the composition, not
+to build new infrastructure.
+
+- `examples/multi-adapter/` — minimal example showing one registry
+  feeding MCP + LSP + DAP adapters in one process, each on its own
+  transport, each independently runnable
+- Document the per-protocol metadata pattern
+  (`:metadata {:protocols #{:mcp :lsp} :mcp {...} :lsp {...}}`) as
+  the contract consumers use when a single port should surface
+  through multiple protocols with shape translation
+- Verify via defnet (the canonical consumer) that MCP + LSP composition
+  works end-to-end against the same underlying graph. The capability
+  layer, per-protocol exposure metadata, and DAP client/proxy all live
+  in defnet — not in defport.
+
+### 8.4 Sugar facade consolidation
+
+Audit 2026-04-12 confirmed `src/mcp.cljc` (1041 LOC, ns `mcp`),
+`src/lsp.cljc` (614 LOC, ns `lsp`), and `src/dap.cljc` (571 LOC, ns `dap`)
+are pure DSL wrappers over `defport.{mcp,lsp,dap}`, not duplicated
+implementation. Dependency direction is unidirectional
+(sugar → adapter). **Zero test files and zero internal code requires
+the single-segment namespaces** — they exist only for tutorial/README
+ergonomics.
+
+Single-segment namespaces cause CLJS warnings and collide with user code
+(`(require '[mcp])`). Consolidation plan:
+
+- Rename `src/mcp.cljc` → `src/defport/mcp_sugar.cljc` (ns
+  `defport.mcp-sugar`), same for LSP and DAP
+- Create `src/defport.cljc` as a root re-export for the README pattern
+  `(:require [defport :as mcp] :refer [deftool])` — this matches how
+  the examples already import things
+- Verify the current state of examples/ and the classpath-resolution of
+  bare `[defport ...]` requires before starting (some examples may be
+  broken today)
+- Run 304 tests green, update CHANGELOG
+
+Estimated cost: ~2 hours. Low risk because the tests don't touch the
+single-segment namespaces.
+
+---
+
+## Revised ordering (post-audit)
+
+The audits re-ordered the critical path. Current sequence:
+
+1. **Verify defport root namespace state** (30 min) — does
+   `src/defport.cljc` exist, what do `(:require [defport ...])`
+   statements in examples/ actually resolve to, what's broken
+2. **Sugar consolidation** (8.4, ~2 h) — rename sugar files, add root
+   re-export, update examples, 304 tests green
+3. **Defport cleanup** (~3 h) — 3 stray catch-type conditionals, stdio
+   transport consolidation/documentation, `examples/multi-adapter/`
+4. **DAP honest-done pass** (8.2, ~4 d) — cancellation/progress state,
+   stackTrace plumbing, missing events
+5. **LSP core-features pass** (8.1, ~1 w) — state port from MCP, default
+   handlers for hover/definition/references/documentSymbol/rename,
+   first real test file
+
+At this point defport ships three composable adapters at honest parity.
+The follow-on work (defnet capability layer, defnet LSP facade, defnet
+DAP client/proxy/recorder) is consumer-side and tracked in defnet's
+roadmap, not here.
 
 ---
 
@@ -234,6 +347,9 @@ be declined unless the design rationale changes:
 | 2026-04-12 | Subprocess clients removed | Not defport's concern; belongs in user code. Zero tests, zero callers. ~1,600 lines deleted. |
 | 2026-04-12 | Synchronous handler contract codified | Ring-style. Never add async primitives to the contract. Users bring their own async via `Unwrappable`. |
 | 2026-04-12 | Reader conditional concentration | Platform-specific code lives in `defport.util.platform`. Mechanical conditionals eliminated via helpers (`error-message`, `try-any`, `now-ms`, etc.). |
+| 2026-04-12 | Unified use is emergent, not a feature | Defport ships three independent adapters that all consume `PortRegistry`. Composing them is a user-code concern. No cross-protocol router, no capability layer in defport. The bar: individual use simple enough that multi-adapter composition is a trivial consequence. |
+| 2026-04-12 | Capability layer lives in consumer | A capability is a function over a domain model exposed through multiple protocols with shape translation. This belongs in the consumer (defnet), not defport. Defport provides `ProtocolAdapter` + `PortRegistry`; the consumer provides the capabilities and the per-protocol metadata that controls exposure. |
+| 2026-04-12 | DAP client + proxy belongs in defnet | Defnet's use of DAP (observing live debug sessions, projecting runtime events onto the static graph) is the "semantic meets metal" bridge. That implementation lives in defnet, not defport. Defport provides the `ProtocolClient` contract and the DAP protocol mechanics; defnet provides the subprocess spawning, the proxy transport, and the source-to-graph attribution. |
 
 See [docs/PROJECT_HISTORY.md](docs/PROJECT_HISTORY.md) for complete evolution.
 

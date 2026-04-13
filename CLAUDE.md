@@ -53,6 +53,10 @@ Defport holds what MCP, LSP, and DAP have in common: JSON-RPC framing, dispatch,
 
 A single port definition should be exposable via all three protocols with zero protocol-specific knowledge in the port itself.
 
+**Unified use is emergent, not a feature.** Defport does not ship a "cross-protocol router" or a "capability layer." If an application wants MCP + LSP + DAP running together, it instantiates three adapters against one `PortRegistry` in its own `main`. That's six lines of user code and requires no defport abstraction beyond what already exists. The bar: individual-protocol use must be simple enough that composing three adapters into one process is the trivial consequence.
+
+The **capability layer** (functions over a domain model that are exposed through multiple protocols with shape translation) lives in the consumer, not in defport. Defnet is the canonical example: defnet owns the graph and the capabilities; defport provides the three adapters defnet plugs them into.
+
 ### 4. Transport, not dispatcher, manages concurrency
 
 - **Stdio**: one process = one peer = sequential. No concurrency primitives needed anywhere.
@@ -62,8 +66,8 @@ A single port definition should be exposable via all three protocols with zero p
 ### 5. The server/client asymmetry
 
 - **Server-side defport** is fully synchronous and fully cross-platform. Node's `process.stdin.on('data', ...)` callbacks run synchronously in their body; no async machinery is needed.
-- **Client-side defport** (spawning external MCP/LSP/DAP servers via `connect!`) inherently needs async on Node because you can't block the event loop. This is the one place where a platform semantic gap is real, and it is isolated to client module code.
-- Client-side features may ship JVM-only until someone writes the Node implementation. This is acceptable and honest.
+- **Client-side defport does not ship.** The `ProtocolClient` protocol exists in `defport.core` as a *contract*; implementations belong in consumer code. A consumer that genuinely needs client role — spawning an external MCP server, proxying LSP traffic to rust-analyzer, observing a live DAP debug session — writes the `ProtocolClient` implementation in its own codebase using `babashka.process` / `ProcessBuilder` / Node `child_process`. Defnet is the canonical consumer; its DAP proxy lives in defnet, not here.
+- The one place a platform semantic gap is real — Node cannot block the event loop while waiting on a subprocess — is isolated to that consumer-side code, not defport's.
 
 ### 6. Reader conditionals are for structural platform gaps only
 

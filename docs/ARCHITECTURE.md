@@ -729,53 +729,69 @@ A port is defined once and exposed through any or all supported protocols. Defpo
 
 ---
 
-## Future Architecture
+## Multi-Protocol Composition
 
-### Multi-Protocol Vision
-
-Phase 7 will add LSP and DAP adapters:
+The LSP and DAP server adapters exist today alongside MCP. All three satisfy the same `ProtocolAdapter` protocol and consume the same `PortRegistry`. This is the composition model:
 
 ```
-         ┌─────────────┐
-         │  Your App   │
-         └─────────────┘
-                │
-                ▼
-         ┌─────────────┐
-         │ Port Registry│
-         └─────────────┘
-                │
-    ┌───────────┼───────────┐
-    ▼           ▼           ▼
-┌───────┐  ┌───────┐  ┌───────┐
-│  MCP  │  │  LSP  │  │  DAP  │
-└───────┘  └───────┘  └───────┘
-    │           │           │
-    ▼           ▼           ▼
- Claude      pyright     debugpy
- Cursor    rust-analyzer   delve
+         ┌─────────────────────┐
+         │  Consumer (defnet)  │
+         │  capability layer   │
+         └──────────┬──────────┘
+                    │ registers ports once
+                    ▼
+            ┌───────────────┐
+            │  PortRegistry │
+            └───────┬───────┘
+          ┌─────────┼─────────┐
+          ▼         ▼         ▼
+      ┌───────┐ ┌───────┐ ┌───────┐
+      │  MCP  │ │  LSP  │ │  DAP  │     ← defport ships these
+      └───┬───┘ └───┬───┘ └───┬───┘
+          ▼         ▼         ▼
+       Claude    editors   debug UIs
 ```
 
-Same ports, exposed via multiple protocols.
+**Unified use is emergent.** Defport does not provide a "cross-protocol router" or any abstraction above `ProtocolAdapter`. Running MCP + LSP + DAP together is six lines in the consumer's `main`:
 
-### Universal Code Intelligence
-
-The end goal:
 ```clojure
-;; Define once
-(core/register-port! registry
-  {:id :goto-definition
-   :handler goto-definition-handler})
+(def registry (reg/create-function-registry))
+(my-app/register-ports! registry)    ;; consumer's capabilities
 
-;; Expose via MCP (Claude, Cursor)
-(def mcp-server (mcp/create-adapter ...))
+(def mcp (mcp/create-mcp-adapter {:server-info {...}}))
+(def lsp (lsp/create-lsp-adapter {:server-info {...}}))
+(def dap (dap/create-dap-adapter {:server-info {...}}))
 
-;; Expose via LSP (VS Code, Emacs)
-(def lsp-server (lsp/create-client ...))
-
-;; Expose via GraphQL (Web IDE)
-(def graphql-server (graphql/create-adapter ...))
+;; each runs on its own transport, all share one registry and one graph
 ```
+
+Each adapter is independently runnable, independently testable, independently consumable. A user who only wants MCP pays nothing for LSP or DAP — they just don't instantiate them. A user who wants all three gets it for free because the adapters don't know about each other; they only know the shared `PortRegistry` contract.
+
+### Where the capability layer lives
+
+A "capability" is a function over a domain model — `find-references(symbol, scope)`, `rename-symbol(old, new)`, `explain-function(id)` — that can be invoked from multiple protocols with per-protocol shape translation. **Capabilities live in the consumer, not in defport.**
+
+Defnet is the canonical consumer. Its graph (static structure + runtime events + context events) is the domain model. Its capabilities operate on that graph. The per-protocol exposure is metadata on the port:
+
+```clojure
+;; In defnet, not defport
+(reg/register-port! registry
+  {:id :find-references
+   :handler (fn [ctx] (graph/find-references ...))
+   :metadata {:protocols #{:mcp :lsp}
+              :mcp {:description "Find callers of a function"}
+              :lsp {:method "textDocument/references"}}})
+```
+
+The MCP adapter reads `:mcp` metadata when listing tools; the LSP adapter reads `:lsp` metadata when registering methods. The capability function itself is written once and knows nothing about either protocol. Defport stays thin; defnet does the semantic work.
+
+### DAP as the runtime membrane
+
+Where MCP and LSP are static-graph frontends, DAP is the runtime feed. The consumer (defnet) can observe a live debug session — by acting as a DAP client attached to a real debug adapter, or by sitting as a proxy between an IDE and the real adapter — and record stack frames, scopes, variable snapshots, and step events into its event log. Those events attribute to graph nodes via source mapping, grounding trust scoring, hotspot analysis, and call-path data in measured runtime behavior instead of static inference.
+
+This is where "the semantic meets the metal": the static graph names concepts, the binary descent (DWARF, disasm, compiler IR) grounds them in machine code, and DAP provides the time dimension — which representations actually executed, when, with what values. All three streams land in the same event-sourced store.
+
+**None of this lives in defport.** Defport provides the `ProtocolClient` contract (in `defport.core`) and the DAP protocol mechanics (JSON-RPC framing, method dispatch, state, cancellation). The client implementation, the proxy transport, the source-mapping, the graph attribution — all consumer code.
 
 ---
 
