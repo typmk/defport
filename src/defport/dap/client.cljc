@@ -278,14 +278,18 @@
     nil))
 
 (defn connect!
-  "JVM-only: start, initialize, return the client. Throws on failure."
+  "JVM-only: start, initialize, return the client. Throws on failure.
+   Timeout defaults to 30s — enough for a cold JVM subprocess boot.
+   Override with :connect-timeout-ms."
   [^Client client opts]
   #?(:clj
-     (let [done (promise)]
+     (let [done (promise)
+           timeout-ms (or (:connect-timeout-ms opts) 30000)]
        (connect-async! client opts (fn [c err] (deliver done [c err])))
-       (let [[c err] (deref done 5000 [::timeout nil])]
+       (let [[c err] (deref done timeout-ms [::timeout nil])]
          (cond
-           (= ::timeout c) (throw (ex-info "DAP initialize timed out" {}))
+           (= ::timeout c) (throw (ex-info "DAP initialize timed out"
+                                           {:timeout-ms timeout-ms}))
            err             (throw (ex-info "DAP initialize failed" {:error err}))
            :else           c)))
      :cljs

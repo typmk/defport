@@ -153,9 +153,14 @@
      (defn- output-stream->output-chan
        "Create a channel that writes messages to the output stream.
         Runs in a dedicated thread for blocking I/O.
-        Closes output when channel closes."
+        Closes output when channel closes.
+
+        Returns [channel done-channel] so callers that need to wait
+        for the writer to drain (e.g. transport-start before it
+        returns) can block on done-channel."
        [^OutputStream output]
-       (let [messages (async/chan 1)]
+       (let [messages (async/chan 1)
+             done     (async/chan 1)]
          (async/thread
            (try
              (loop []
@@ -165,8 +170,9 @@
              (catch Exception _e
                nil))
            ;; Ensure output is flushed on close
-           (try (.flush output) (catch Exception _)))
-         messages))
+           (try (.flush output) (catch Exception _))
+           (async/close! done))
+         [messages done]))
 
      (defrecord StdioTransport [running?*
                                 input-ch
@@ -174,18 +180,21 @@
                                 input-stream
                                 output-stream
                                 stderr
-                                process-thread]
+                                process-thread
+                                drain-on-exit?
+                                out-done*]
        core/Transport
        (transport-id [_] :stdio)
 
        (transport-start [this handler]
          (reset! running?* true)
          (let [in-stream (or @input-stream System/in)
-               out-stream (or @output-stream System/out)
-               in-ch (input-stream->input-chan in-stream)
-               out-ch (output-stream->output-chan out-stream)]
+                out-stream (or @output-stream System/out)
+                in-ch (input-stream->input-chan in-stream)
+                [out-ch out-done] (output-stream->output-chan out-stream)]
            (reset! input-ch in-ch)
            (reset! output-ch out-ch)
+           (reset! out-done* out-done)
            ;; Process messages in a dedicated thread with discarding-stdout
            (let [thread-ch
                  (async/thread
@@ -203,9 +212,18 @@
                                    (println "Handler error:" (.getMessage e))))))
                            (recur))))))]
              (reset! process-thread thread-ch)
-             ;; BLOCK until the processing thread completes (connection closes)
-             ;; This is the expected behavior for stdio transports
-             (async/<!! thread-ch))
+             ;; BLOCK until the processing thread completes (EOF on
+             ;; stdin). When drain-on-exit? is set (subprocess mode),
+             ;; also close the output channel and wait for the writer
+             ;; thread to drain + flush before returning — otherwise
+             ;; a JVM subprocess can exit before its last response
+             ;; hits stdout. Tests that drive the transport directly
+             ;; via transport-send after transport-start returns
+             ;; should NOT set drain-on-exit?, so out-ch stays open.
+             (async/<!! thread-ch)
+             (when drain-on-exit?
+               (async/close! out-ch)
+               (async/<!! out-done)))
            nil))
 
        (transport-stop [_]
@@ -339,7 +357,9 @@
         (atom (:input-stream opts))               ; input-stream
         (atom (:output-stream opts))              ; output-stream
         (atom (or (:stderr opts) *err*))          ; stderr
-        (atom nil))                               ; process-thread
+        (atom nil)                                ; process-thread
+        (boolean (:drain-on-exit? opts))          ; drain-on-exit?
+        (atom nil))                               ; out-done*
 
       :cljs
       (if (exists? js/process)

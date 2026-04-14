@@ -178,14 +178,18 @@
 
 (defn dispatch-incoming!
   "Route one inbound message to the right place: response → pending,
-   notification → handler, server-initiated request → tap log
-   (not yet implemented)."
+   notification → handler, server-initiated request → tap log.
+
+   Checks for :result / :error key presence (not value truthiness)
+   so responses carrying a nil body still resolve their pending."
   [^Client client message]
-  (let [{:keys [id method result error params]} message]
+  (let [{:keys [id method params]} message
+        has-result? (contains? message :result)
+        has-error?  (contains? message :error)]
     (cond
-      (and id (or result error) (not method))
+      (and id (or has-result? has-error?) (not method))
       (when-let [p (forget-pending! client id)]
-        (resolve-pending! p result error))
+        (resolve-pending! p (:result message) (:error message)))
 
       (and method id)
       (do
@@ -273,14 +277,19 @@
     nil))
 
 (defn connect!
-  "JVM-only blocking connect. Returns the client or throws."
+  "JVM-only blocking connect. Returns the client or throws.
+   Timeout defaults to 30s — enough for a cold JVM subprocess to
+   boot. Override with `:connect-timeout-ms` in opts if you need
+   a tighter bound."
   [^Client client opts]
   #?(:clj
-     (let [done (promise)]
+     (let [done (promise)
+           timeout-ms (or (:connect-timeout-ms opts) 30000)]
        (connect-async! client opts (fn [c err] (deliver done [c err])))
-       (let [[c err] (deref done 5000 [::timeout nil])]
+       (let [[c err] (deref done timeout-ms [::timeout nil])]
          (cond
-           (= ::timeout c) (throw (ex-info "MCP initialize timed out" {}))
+           (= ::timeout c) (throw (ex-info "MCP initialize timed out"
+                                           {:timeout-ms timeout-ms}))
            err             (throw (ex-info "MCP initialize failed" {:error err}))
            :else           c)))
      :cljs

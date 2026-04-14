@@ -1255,8 +1255,12 @@
   (protocol-dispatch [this method params context]
     (let [handlers @method-handlers*
           handler (get handlers method)
-          ;; Enrich context with adapter options AND instance state
-          enriched-context (assoc (merge context adapter-opts)
+          ;; Enrich context with adapter options AND instance state.
+          ;; Merge order: adapter-opts provides defaults, caller's
+          ;; context wins on conflict — so a caller that explicitly
+          ;; sets :port-registry at dispatch time still overrides the
+          ;; one captured at adapter creation.
+          enriched-context (assoc (merge adapter-opts context)
                                  :state* state*)]
       (if handler
         (platform/try-any
@@ -1375,11 +1379,17 @@
          uri-scheme (or (:uri-scheme opts) "defport")
 
          ;; Build adapter options for context enrichment
-         adapter-opts {:refactoring-enabled? refactoring-enabled?
-                      :tool-filter (:tool-filter opts)
-                      :enable-subscriptions? subscriptions-enabled?
-                      :performance performance
-                      :uri-scheme uri-scheme}
+         adapter-opts (cond-> {:refactoring-enabled? refactoring-enabled?
+                               :tool-filter (:tool-filter opts)
+                               :enable-subscriptions? subscriptions-enabled?
+                               :performance performance
+                               :uri-scheme uri-scheme}
+                        ;; When sugar/create-adapter :mcp captures a
+                        ;; registry, surface it so protocol-dispatch
+                        ;; injects it into enriched-context for handlers
+                        ;; that walk the registry (tools/list etc.).
+                        (:port-registry opts)
+                        (assoc :port-registry (:port-registry opts)))
 
          ;; Per-adapter protocol state — no global sharing
          state* (or (:state* opts) (create-protocol-state))
@@ -1622,7 +1632,13 @@
 
 (defmethod sugar/create-adapter :mcp
   [_protocol opts]
-  (create-mcp-adapter opts))
+  ;; Capture the sugar registry so downstream protocol-dispatch
+  ;; calls find a :port-registry in context even when transports
+  ;; don't thread one in themselves. Consumers that need their own
+  ;; registry pass :registry in opts; otherwise the shared
+  ;; sugar/*registry* is captured.
+  (let [registry (or (:registry opts) (deref #'sugar/*registry*))]
+    (create-mcp-adapter (assoc opts :port-registry registry))))
 
 ;; ============================================================================
 ;; Top-level run! convenience

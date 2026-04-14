@@ -209,20 +209,27 @@
 
 (defn dispatch-incoming!
   "Route a single inbound message to the right place:
-   - Has :id and :result / :error → resolve the matching pending
+   - Has :id and :result / :error key → resolve the matching pending
    - Has :method and no :id → fire the notification handler
    - Has :method and :id → server-initiated request (rare); not yet
      implemented, logged via tap and ignored.
 
    Driver loops call this for every message they read off the
-   transport. Pure dispatch — no I/O."
+   transport. Pure dispatch — no I/O.
+
+   Checks for :result / :error *key presence*, not value truthiness —
+   a valid response may carry `:result nil` (e.g. shutdown, or an
+   LSP request with no meaningful body), and that must still resolve
+   the pending."
   [^Client client message]
-  (let [{:keys [id method result error params]} message]
+  (let [{:keys [id method params]} message
+        has-result? (contains? message :result)
+        has-error?  (contains? message :error)]
     (cond
       ;; Response to one of our requests
-      (and id (or result error) (not method))
+      (and id (or has-result? has-error?) (not method))
       (when-let [p (forget-pending! client id)]
-        (resolve-pending! p result error))
+        (resolve-pending! p (:result message) (:error message)))
 
       ;; Server-initiated request (workspace/applyEdit, window/showMessageRequest)
       (and method id)
