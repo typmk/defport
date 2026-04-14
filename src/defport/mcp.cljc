@@ -51,6 +51,7 @@
                (when (and (map? e) (:event e))
                  (record-metric! e))))"
   (:require [defport.core :as core]
+            [defport.mcp.spec :as spec]
             [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]
             [defport.util.protocol :as proto-util]
@@ -1383,27 +1384,35 @@
          ;; Per-adapter protocol state — no global sharing
          state* (or (:state* opts) (create-protocol-state))
 
-         ;; Default method handlers
-         default-handlers {"initialize" #(handle-initialize %1 %2 server-info)
-                          "tools/list" handle-tools-list
-                          "tools/call" handle-tools-call
-                          "tools/call/cancel" handle-tools-call-cancel
-                          "prompts/list" handle-prompts-list
-                          "prompts/get" handle-prompts-get
-                          "resources/list" handle-resources-list
-                          "resources/read" handle-resources-read
-                          "resources/subscribe" handle-resources-subscribe
-                          "resources/unsubscribe" handle-resources-unsubscribe
-                          "resources/templates/list" (fn [_params _context] {:resourceTemplates []})  ; MCP Inspector extension
-                          "roots/list" (fn [params ctx] (handle-roots-list state* params ctx))
-                          "elicitation/create" handle-elicitation-create
-                          "elicitation/submit" handle-elicitation-submit
-                          "elicitation/cancel" handle-elicitation-cancel
-                          "completion/complete" handle-completion-complete
-                          "logging/setLevel" handle-logging-set-level
-                          "ping" #(handle-ping %1 %2 server-info)}
+         ;; Default method handlers derived from defport.mcp.spec. For
+         ;; each spec entry with a :handler-sym, resolve the symbol to
+         ;; a var and install it under the wire method string. Three
+         ;; methods need closure wrapping because their handlers take
+         ;; extra implicit arguments (server-info / state*) that the
+         ;; dispatcher doesn't know about; those overrides take
+         ;; precedence over the spec-derived entries.
+         spec-derived-handlers
+         (reduce (fn [acc [wire-method handler-sym]]
+                   (if-let [v (resolve handler-sym)]
+                     (assoc acc wire-method @v)
+                     acc))
+                 {}
+                 (spec/default-handler-syms))
 
-         ;; Merge custom handlers
+         ;; Overrides for handlers that need closure over server-info
+         ;; or state* — these three can't be flat (2-arity params+ctx)
+         ;; fns without an API change to their handler fn.
+         closure-wrapped-handlers
+         {"initialize" (fn [p ctx] (handle-initialize p ctx server-info))
+          "ping"       (fn [p ctx] (handle-ping p ctx server-info))
+          "roots/list" (fn [p ctx] (handle-roots-list state* p ctx))
+          ;; Inline MCP Inspector extension: no spec entry carries the
+          ;; lambda, so supply it here.
+          "resources/templates/list" (fn [_ _] {:resourceTemplates []})}
+
+         default-handlers (merge spec-derived-handlers closure-wrapped-handlers)
+
+         ;; Merge custom handlers last so they win
          method-handlers (merge default-handlers custom-handlers)]
 
      (->McpAdapter server-info (atom method-handlers) adapter-opts state*))))
