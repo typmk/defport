@@ -126,3 +126,32 @@
           body (if (and (map? resp) (contains? resp :result)) (:result resp) resp)]
       ;; Spec default for :step-in-targets is {:targets []}
       (is (= [] (:targets body))))))
+
+(deftest test-error-default-fires-for-stepping-without-port
+  (testing "stepIn with no port returns the spec :error-default shape"
+    (let [reg (fresh-registry)
+          adapter (sugar/create-adapter :dap
+                    {:server-info {:name "t" :version "0"}
+                     :registry reg})
+          resp (core/protocol-dispatch adapter "stepIn"
+                 {:arguments {:threadId 1}}
+                 {:port-registry reg})
+          body (if (and (map? resp) (contains? resp :result)) (:result resp) resp)]
+      (is (false? (:success body)))
+      (is (re-find #"Stepping not supported" (:message body))))))
+
+(deftest test-error-default-overridden-by-port
+  (testing "registering a port for stepIn replaces the :error-default"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (dap/defcommand step-in
+          [thread-id :- :int]
+          {:allThreadsContinued false :stoppedAtNew true}))
+      (let [adapter (sugar/create-adapter :dap
+                      {:server-info {:name "t" :version "0"}
+                       :registry reg})
+            resp (core/protocol-dispatch adapter "stepIn"
+                   {:arguments {:threadId 1}}
+                   {:port-registry reg})
+            body (if (and (map? resp) (contains? resp :result)) (:result resp) resp)]
+        (is (true? (:stoppedAtNew body)))))))

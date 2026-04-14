@@ -109,13 +109,13 @@
     :doc        "Gracefully terminate the debuggee."}
 
    :terminate-threads
-   {:command    "terminateThreads"
-    :kind       :request
-    :direction  :client->server
-    :capability :supportsTerminateThreadsRequest
-    :sugar      :raw
-    :default    (constantly {})
-    :doc        "Terminate one or more threads."}
+   {:command       "terminateThreads"
+    :kind          :request
+    :direction     :client->server
+    :capability    :supportsTerminateThreadsRequest
+    :sugar         :raw
+    :error-default {:success false :message "Thread termination not supported"}
+    :doc           "Terminate one or more threads."}
 
    :configuration-done
    {:command    "configurationDone"
@@ -214,76 +214,76 @@
     :doc        "Resume execution after a stop."}
 
    :next
-   {:command    "next"
-    :kind       :request
-    :direction  :client->server
-    :capability nil
-    :sugar      :thread
-    :default    (constantly {})
-    :doc        "Step over the next line."}
+   {:command       "next"
+    :kind          :request
+    :direction     :client->server
+    :capability    nil
+    :sugar         :thread
+    :error-default {:success false :message "Stepping not supported in this mode"}
+    :doc           "Step over the next line."}
 
    :step-in
-   {:command    "stepIn"
-    :kind       :request
-    :direction  :client->server
-    :capability nil
-    :sugar      :thread
-    :default    (constantly {})
-    :doc        "Step into a call."}
+   {:command       "stepIn"
+    :kind          :request
+    :direction     :client->server
+    :capability    nil
+    :sugar         :thread
+    :error-default {:success false :message "Stepping not supported in this mode"}
+    :doc           "Step into a call."}
 
    :step-out
-   {:command    "stepOut"
-    :kind       :request
-    :direction  :client->server
-    :capability nil
-    :sugar      :thread
-    :default    (constantly {})
-    :doc        "Step out of the current function."}
+   {:command       "stepOut"
+    :kind          :request
+    :direction     :client->server
+    :capability    nil
+    :sugar         :thread
+    :error-default {:success false :message "Stepping not supported in this mode"}
+    :doc           "Step out of the current function."}
 
    :step-back
-   {:command    "stepBack"
-    :kind       :request
-    :direction  :client->server
-    :capability :supportsStepBack
-    :sugar      :thread
-    :default    (constantly {})
-    :doc        "Step backward to the previous statement."}
+   {:command       "stepBack"
+    :kind          :request
+    :direction     :client->server
+    :capability    :supportsStepBack
+    :sugar         :thread
+    :error-default {:success false :message "Step back not supported"}
+    :doc           "Step backward to the previous statement."}
 
    :reverse-continue
-   {:command    "reverseContinue"
-    :kind       :request
-    :direction  :client->server
-    :capability :supportsStepBack
-    :sugar      :thread
-    :default    (constantly {})
-    :doc        "Reverse-execute until the previous breakpoint."}
+   {:command       "reverseContinue"
+    :kind          :request
+    :direction     :client->server
+    :capability    :supportsStepBack
+    :sugar         :thread
+    :error-default {:success false :message "Reverse continue not supported"}
+    :doc           "Reverse-execute until the previous breakpoint."}
 
    :restart-frame
-   {:command    "restartFrame"
-    :kind       :request
-    :direction  :client->server
-    :capability :supportsRestartFrame
-    :sugar      :frame
-    :default    (constantly {})
-    :doc        "Restart the given stack frame from its top."}
+   {:command       "restartFrame"
+    :kind          :request
+    :direction     :client->server
+    :capability    :supportsRestartFrame
+    :sugar         :frame
+    :error-default {:success false :message "Restart frame not supported in this mode"}
+    :doc           "Restart the given stack frame from its top."}
 
    :pause
-   {:command    "pause"
-    :kind       :request
-    :direction  :client->server
-    :capability nil
-    :sugar      :thread
-    :default    (constantly {})
-    :doc        "Pause execution of one or all threads."}
+   {:command       "pause"
+    :kind          :request
+    :direction     :client->server
+    :capability    nil
+    :sugar         :thread
+    :error-default {:success false :message "Pause not supported in this mode"}
+    :doc           "Pause execution of one or all threads."}
 
    :goto
-   {:command    "goto"
-    :kind       :request
-    :direction  :client->server
-    :capability :supportsGotoTargetsRequest
-    :sugar      :raw
-    :default    (constantly {})
-    :doc        "Set the next instruction to execute to a specific target."}
+   {:command       "goto"
+    :kind          :request
+    :direction     :client->server
+    :capability    :supportsGotoTargetsRequest
+    :sugar         :raw
+    :error-default {:success false :message "Goto not supported in this mode"}
+    :doc           "Set the next instruction to execute to a specific target."}
 
    :goto-targets
    {:command    "gotoTargets"
@@ -427,13 +427,13 @@
     :doc        "Read raw bytes from memory."}
 
    :write-memory
-   {:command    "writeMemory"
-    :kind       :request
-    :direction  :client->server
-    :capability :supportsWriteMemoryRequest
-    :sugar      :raw
-    :default    (constantly {})
-    :doc        "Write raw bytes to memory."}
+   {:command       "writeMemory"
+    :kind          :request
+    :direction     :client->server
+    :capability    :supportsWriteMemoryRequest
+    :sugar         :raw
+    :error-default {:success false :message "Memory write not supported in this mode"}
+    :doc           "Write raw bytes to memory."}
 
    :disassemble
    {:command    "disassemble"
@@ -570,9 +570,20 @@
     (get sugar-extractors k)))
 
 (defn default-response
-  "Default-response value or fn for a command-name."
+  "Body default-response value or fn for a command-name. This is the
+   success body shape returned when a command has no port registered
+   AND no :error-default. Use error-default-response if the command
+   semantically fails when unimplemented."
   [command-name]
   (:default (method-for command-name)))
+
+(defn error-default-response
+  "Error default for a command-name, or nil if the command degrades
+   to a body default instead. Returns a value or a (fn [args]) that
+   produces a `{:success false :message ...}` shape suitable for the
+   DAP wire when no port has claimed the command."
+  [command-name]
+  (:error-default (method-for command-name)))
 
 (defn server-initiated?
   "True for commands the adapter initiates against the client

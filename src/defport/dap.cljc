@@ -544,60 +544,12 @@
     (emit-event! :dap/continued {})
     {:allThreadsContinued true}))
 
-(defmethod handle-request "next"
-  [_ _args _context]
-  ;; Step over - not supported in REPL mode
-  {:success false :message "Stepping not supported in REPL mode"})
+;; next, stepIn, stepOut, stepBack, pause, reverseContinue, restartFrame,
+;; goto — handled by the spec :error-default in defport.dap.spec.
+;; Backend integrations (FlowStorm, JDI, ...) wire up real behavior by
+;; registering ports with the matching :dap/command metadata.
 
-(defmethod handle-request "stepIn"
-  [_ _args _context]
-  {:success false :message "Stepping not supported in REPL mode"})
-
-(defmethod handle-request "stepOut"
-  [_ _args _context]
-  {:success false :message "Stepping not supported in REPL mode"})
-
-(defmethod handle-request "stepBack"
-  [_ _args context]
-  (let [{:keys [backend-type]} context]
-    (if (= backend-type :flowstorm)
-      ;; FlowStorm backend would handle this
-      {:success false :message "FlowStorm backend not connected"}
-      {:success false :message "Step back not supported"})))
-
-(defmethod handle-request "pause"
-  [_ _args _context]
-  {:success false :message "Pause not supported in REPL mode"})
-
-(defmethod handle-request "reverseContinue"
-  [_ _args context]
-  (let [{:keys [backend-type]} context]
-    (if (= backend-type :flowstorm)
-      {:success false :message "FlowStorm backend not connected"}
-      {:success false :message "Reverse continue not supported"})))
-
-(defmethod handle-request "restartFrame"
-  [_ args context]
-  (let [{:keys [backend-type]} context
-        {:keys [frameId]} args]
-    (if (= backend-type :flowstorm)
-      {:success false :message "FlowStorm backend not connected"}
-      {:success false :message "Restart frame not supported in this mode"})))
-
-(defmethod handle-request "goto"
-  [_ args context]
-  (let [{:keys [threadId targetId]} args]
-    {:success false :message "Goto not supported in REPL mode"}))
-
-(defmethod handle-request "gotoTargets"
-  [_ args context]
-  (let [{:keys [source line column]} args]
-    {:targets []}))
-
-(defmethod handle-request "stepInTargets"
-  [_ args context]
-  (let [{:keys [frameId]} args]
-    {:targets []}))
+;; gotoTargets, stepInTargets — handled by spec :default ({:targets []}).
 
 ;; --- Threads & Stack ---
 
@@ -606,18 +558,9 @@
   ;; Return single main thread for REPL mode
   {:threads [{:id 1 :name "main"}]})
 
-(defmethod handle-request "stackTrace"
-  [_ args context]
-  (let [{:keys [adapter-state backend-type]} context]
-    (case backend-type
-      :repl
-      ;; No stack trace in REPL mode
-      {:stackFrames []
-       :totalFrames 0}
-
-      ;; Other backends would provide real stack traces
-      {:stackFrames []
-       :totalFrames 0})))
+;; stackTrace — handled by spec :default ({:stackFrames [] :totalFrames 0}).
+;; Backends that produce real stack traces register a port with
+;; :dap/command "stackTrace".
 
 (defmethod handle-request "scopes"
   [_ args context]
@@ -753,10 +696,7 @@
 
 ;; --- Thread Management ---
 
-(defmethod handle-request "terminateThreads"
-  [_ args context]
-  (let [{:keys [threadIds]} args]
-    {:success false :message "Thread termination not supported"}))
+;; terminateThreads — handled by spec :error-default.
 
 ;; --- Memory Operations ---
 
@@ -770,10 +710,7 @@
        :unreadableBytes count}
       {:success false :message "Memory read not supported in this mode"})))
 
-(defmethod handle-request "writeMemory"
-  [_ args context]
-  (let [{:keys [memoryReference offset allowPartial data]} args]
-    {:success false :message "Memory write not supported in this mode"}))
+;; writeMemory — handled by spec :error-default.
 
 ;; --- Disassembly ---
 
@@ -836,15 +773,20 @@
                 ;; A port has claimed this command — route through it.
                 (core/port-execute port (assoc enriched-context :params args))
                 ;; No port: fall back to the legacy handle-request multimethod.
-                ;; If THAT returns "Unknown command", ask the spec registry
-                ;; for a sensible default response so unimplemented commands
-                ;; degrade gracefully instead of erroring.
+                ;; If THAT returns "Unknown command", consult the spec:
+                ;; - prefer :error-default for commands that semantically
+                ;;   should fail when unimplemented (stepping, pause, etc.)
+                ;; - else use :default for commands that degrade to an
+                ;;   empty success body (gotoTargets → {:targets []})
                 (let [legacy (handle-request command args enriched-context)]
                   (if (and (false? (:success legacy))
                            (re-find #"^Unknown command:" (str (:message legacy)))
                            cmd-key)
-                    (let [d (spec/default-response cmd-key)]
-                      (if (fn? d) (d args) d))
+                    (or (let [e (spec/error-default-response cmd-key)]
+                          (when e (if (fn? e) (e args) e)))
+                        (let [d (spec/default-response cmd-key)]
+                          (when d (if (fn? d) (d args) d)))
+                        legacy)
                     legacy)))]
           ;; Preserve original wrapping semantic: wrap unless :success is
           ;; explicitly true. Tests / transports rely on the {:result ...} shape.
