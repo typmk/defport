@@ -141,7 +141,65 @@
                                  (Object.)))))
 
 #?(:cljs
-   (defn transport [_]
-     (throw (ex-info
-              "defport.dap.client.transports.subprocess is JVM-only on this build. The Node child_process.spawn variant is not yet shipped."
-              {:platform :cljs}))))
+   (do
+     (defrecord SubprocessDapTransportNode
+                [command process* alive?* recv-queue decoder*]
+       client/ClientTransport
+       (transport-start! [this]
+         (let [child-process (js/require "child_process")
+               proc (.spawn child-process
+                            (first command)
+                            (clj->js (vec (rest command)))
+                            #js {:stdio "pipe"})]
+           (reset! process* proc)
+           (reset! alive?* true)
+           (reset! decoder* (framing/empty-state))
+           (.on (.-stdout proc) "data"
+                (fn [chunk]
+                  (let [[msgs new-decoder] (framing/feed @decoder* chunk)]
+                    (reset! decoder* new-decoder)
+                    (doseq [m msgs] (.push recv-queue m)))))
+           (.on (.-stderr proc) "data"
+                (fn [chunk]
+                  (tap> {:event :dap.client.subprocess/stderr
+                         :text (.toString chunk "utf8")})))
+           (.on proc "exit"
+                (fn [_code _signal]
+                  (reset! alive?* false)
+                  (.push recv-queue ::client/eof)))
+           this))
+
+       (transport-send! [this msg]
+         (when-let [proc @process*]
+           (let [encoded (framing/encode-message msg)]
+             (.write (.-stdin proc) encoded)))
+         this)
+
+       (transport-recv! [_]
+         (if (zero? (.-length recv-queue))
+           ::client/no-message
+           (let [m (.shift recv-queue)]
+             (if (= m ::client/eof) ::client/eof m))))
+
+       (transport-stop! [_]
+         (reset! alive?* false)
+         (when-let [proc @process*]
+           (try (.end (.-stdin proc)) (catch :default _))
+           (try (.kill proc) (catch :default _))
+           (reset! process* nil))
+         nil)
+
+       (transport-alive? [_]
+         (boolean (and @alive?* @process*))))
+
+     (defn transport
+       "Construct a SubprocessDapTransportNode that runs `command`.
+
+        Example:
+          (transport [\"python\" \"-m\" \"debugpy.adapter\"])"
+       [command]
+       (->SubprocessDapTransportNode (vec command)
+                                     (atom nil)
+                                     (atom false)
+                                     (array)
+                                     (atom nil)))))

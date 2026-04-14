@@ -157,11 +157,79 @@
                                  (Object.)))))
 
 #?(:cljs
-   ;; Placeholder — the Node child_process.spawn implementation will
-   ;; live here behind a :cljs reader conditional. Loading this
-   ;; namespace on CLJS today exposes only the JVM-only Process
-   ;; throw-on-call so consumers see a clear error if they try.
-   (defn transport [_]
-     (throw (ex-info
-              "defport.lsp.client.transports.subprocess is JVM-only on this build. The Node child_process.spawn variant is not yet shipped — track defport repo for updates, or write your own ClientTransport against node:child_process."
-              {:platform :cljs}))))
+   (do
+     ;; ----------------------------------------------------------------------
+     ;; Node child_process implementation
+     ;; ----------------------------------------------------------------------
+     ;; Node is event-driven — there's no reader thread. proc.stdout
+     ;; emits 'data' events that we feed into the framing decoder; parsed
+     ;; messages are pushed into a JS array used as a queue. The LSP
+     ;; client's CLJS driver loop polls the queue via transport-recv!
+     ;; and reschedules itself with js/setImmediate.
+
+     (defrecord SubprocessLspTransportNode
+                [command process* alive?* recv-queue decoder*]
+       client/ClientTransport
+       (transport-start! [this]
+         (let [child-process (js/require "child_process")
+               proc (.spawn child-process
+                            (first command)
+                            (clj->js (vec (rest command)))
+                            #js {:stdio "pipe"})]
+           (reset! process* proc)
+           (reset! alive?* true)
+           (reset! decoder* (framing/empty-state))
+           ;; Wire up incoming data → framing → queue
+           (.on (.-stdout proc) "data"
+                (fn [chunk]
+                  (let [[msgs new-decoder] (framing/feed @decoder* chunk)]
+                    (reset! decoder* new-decoder)
+                    (doseq [m msgs] (.push recv-queue m)))))
+           ;; Drain stderr to tap>
+           (.on (.-stderr proc) "data"
+                (fn [chunk]
+                  (tap> {:event :lsp.client.subprocess/stderr
+                         :text (.toString chunk "utf8")})))
+           ;; Mark dead on exit
+           (.on proc "exit"
+                (fn [_code _signal]
+                  (reset! alive?* false)
+                  (.push recv-queue ::client/eof)))
+           this))
+
+       (transport-send! [this msg]
+         (when-let [proc @process*]
+           (let [encoded (framing/encode-message msg)]
+             (.write (.-stdin proc) encoded)))
+         this)
+
+       (transport-recv! [_]
+         (if (zero? (.-length recv-queue))
+           ::client/no-message
+           (let [m (.shift recv-queue)]
+             (if (= m ::client/eof) ::client/eof m))))
+
+       (transport-stop! [_]
+         (reset! alive?* false)
+         (when-let [proc @process*]
+           (try (.end (.-stdin proc)) (catch :default _))
+           (try (.kill proc) (catch :default _))
+           (reset! process* nil))
+         nil)
+
+       (transport-alive? [_]
+         (boolean (and @alive?* @process*))))
+
+     (defn transport
+       "Construct a SubprocessLspTransportNode that runs `command` (a
+        sequential of strings: program + arguments).
+
+        Example:
+          (transport [\"clojure-lsp\"])
+          (transport [\"rust-analyzer\" \"--log-file\" \"ra.log\"])"
+       [command]
+       (->SubprocessLspTransportNode (vec command)
+                                     (atom nil)
+                                     (atom false)
+                                     (array)
+                                     (atom nil)))))

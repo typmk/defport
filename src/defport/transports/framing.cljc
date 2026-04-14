@@ -166,8 +166,11 @@
             [msgs s]
             (let [header-str   (buffer-string (:buffer s) 0 (- end 4) "US-ASCII")
                   headers      (parse-headers header-str)
-                  content-len  (try (Long/parseLong (or (get headers "Content-Length") "0"))
-                                    (catch #?(:clj Exception :cljs js/Error) _ 0))
+                  cl-str       (or (get headers "Content-Length") "0")
+                  content-len  (try
+                                 #?(:clj  (Long/parseLong cl-str)
+                                    :cljs (js/parseInt cl-str 10))
+                                 (catch #?(:clj Exception :cljs js/Error) _ 0))
                   rest-buffer  (buffer-slice (:buffer s) end (buffer-length (:buffer s)))]
               (recur (assoc s
                             :phase :body
