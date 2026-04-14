@@ -37,7 +37,7 @@
         (is (= {:result "(+ 1 2)@7"} result))))))
 
 (deftest test-defcommand-options-merge
-  (testing "options map merges into metadata"
+  (testing "options map merges into metadata; spec resolves wire command name"
     (let [reg (fresh-registry)]
       (binding [sugar/*registry* reg]
         (dap/defcommand set-breakpoints
@@ -45,7 +45,8 @@
           [source :- :map breakpoints :- :vector]
           {:breakpoints breakpoints}))
       (let [port-def (first (core/list-ports reg))]
-        (is (= "set-breakpoints" (get-in port-def [:metadata :dap/command])))
+        ;; spec resolves :set-breakpoints → "setBreakpoints" (DAP wire format)
+        (is (= "setBreakpoints" (get-in port-def [:metadata :dap/command])))
         (is (= true (get-in port-def [:metadata :dangerous])))))))
 
 (deftest test-create-adapter-dap-dispatches

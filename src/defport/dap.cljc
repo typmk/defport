@@ -44,6 +44,7 @@
                (when (and (map? e) (= (namespace (:event e)) \"dap\"))
                  (record-metric! e))))"
   (:require [defport.core :as core]
+            [defport.dap.spec :as spec]
             [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]))
 
@@ -327,11 +328,32 @@
    :supportsExceptionFilterOptions false
    :supportsSingleThreadExecutionRequests false})
 
+(defn- capabilities-from-ports
+  "Walk a PortRegistry and turn registered ports with :dap/command
+   metadata into a capabilities fragment via the spec registry.
+
+   For each port whose :dap/command resolves to a known DAP command
+   in defport.dap.spec, set the corresponding capability flag to true."
+  [port-registry]
+  (when port-registry
+    (reduce (fn [caps port-def]
+              (let [cmd-str  (get-in port-def [:metadata :dap/command])
+                    cmd-key  (and cmd-str (spec/command-name-for cmd-str))
+                    cap-key  (and cmd-key (spec/capability-key cmd-key))]
+                (cond-> caps
+                  cap-key (assoc cap-key true))))
+            {}
+            (core/list-ports port-registry))))
+
 (defn compute-capabilities
-  "Compute DAP capabilities based on backend and registered ports."
+  "Compute DAP capabilities. Layered:
+     1. default-capabilities  — what defport always reports
+     2. backend-type heuristics — extras a known backend implies
+     3. registered-ports → spec — every port whose :dap/command
+        matches a spec entry sets its capability flag
+   Later layers win over earlier ones."
   [port-registry backend-type]
-  (let [ports (when port-registry (core/list-ports port-registry))
-        port-ids (set (map :id ports))]
+  (let [from-ports (capabilities-from-ports port-registry)]
     (cond-> default-capabilities
       ;; FlowStorm supports time-travel
       (= backend-type :flowstorm)
@@ -350,9 +372,8 @@
              :supportsExceptionInfoRequest true
              :supportsLoadedSourcesRequest true)
 
-      ;; Enable completions if port exists
-      (contains? port-ids :completions)
-      (assoc :supportsCompletionsRequest true))))
+      ;; Spec-driven port capabilities (most specific layer)
+      true (merge from-ports))))
 
 ;; ============================================================================
 ;; DAP Request Handlers
@@ -775,6 +796,16 @@
 ;; DAP Protocol Adapter Implementation
 ;; ============================================================================
 
+(defn- find-port-for-command
+  "Look up a port in the registry whose :dap/command metadata matches
+   the wire command string. Returns the live Port instance or nil."
+  [port-registry wire-command]
+  (when port-registry
+    (some (fn [port-def]
+            (when (= wire-command (get-in port-def [:metadata :dap/command]))
+              (core/get-port port-registry (:id port-def))))
+          (core/list-ports port-registry))))
+
 (defrecord DapAdapter [server-info backend-type backend-opts adapter-state]
   core/ProtocolAdapter
 
@@ -791,14 +822,32 @@
     (let [;; DAP uses 'command' not 'method', and 'arguments' not 'params'
           command (or method (:command params) (get params "command"))
           args (or (:arguments params) (get params "arguments") params)
-          ;; Build enriched context
+          port-registry (or (:port-registry context)
+                            (::default-registry this))
+          cmd-key (spec/command-name-for command)
           enriched-context (assoc context
                              :adapter-state adapter-state
                              :backend-type backend-type
                              :backend-opts backend-opts
                              :server-info server-info)]
       (platform/try-any
-        (let [result (handle-request command args enriched-context)]
+        (let [result
+              (if-let [port (find-port-for-command port-registry command)]
+                ;; A port has claimed this command — route through it.
+                (core/port-execute port (assoc enriched-context :params args))
+                ;; No port: fall back to the legacy handle-request multimethod.
+                ;; If THAT returns "Unknown command", ask the spec registry
+                ;; for a sensible default response so unimplemented commands
+                ;; degrade gracefully instead of erroring.
+                (let [legacy (handle-request command args enriched-context)]
+                  (if (and (false? (:success legacy))
+                           (re-find #"^Unknown command:" (str (:message legacy)))
+                           cmd-key)
+                    (let [d (spec/default-response cmd-key)]
+                      (if (fn? d) (d args) d))
+                    legacy)))]
+          ;; Preserve original wrapping semantic: wrap unless :success is
+          ;; explicitly true. Tests / transports rely on the {:result ...} shape.
           (if (:success result)
             result
             {:result result}))
@@ -964,19 +1013,33 @@
 (defmacro defcommand
   "Define a DAP command handler.
 
-  The handler-name is a symbol; its name is used as the DAP command
-  string (e.g. `evaluate`, `continue`, `setBreakpoints`). Parameters
-  are pulled flat from the DAP `arguments` map.
+  The handler-name is a symbol whose keyword form is looked up in
+  defport.dap.spec/methods. The spec entry tells the macro which
+  wire-command string to attach (camelCase per DAP spec) and which
+  capability flag the port implies. Custom commands not in the spec
+  registry fall back to the handler-name's literal kebab-case form.
 
   Usage:
+    (defcommand step-in
+      \"Step into a call.\"
+      [thread-id :- :int]
+      {:allThreadsContinued false})       ; emits :dap/command \"stepIn\"
+
     (defcommand evaluate
       \"Evaluate an expression.\"
       [expression :- :string frameId :- :int]
-      {:result (str \"=> \" expression)})
+      {:result (str \"=> \" expression)})  ; emits :dap/command \"evaluate\"
 
-  The generated port carries {:dap/command \"evaluate\"} metadata."
+    (defcommand my-custom-cmd                 ; not in spec
+      [arg :- :string]                        ; emits :dap/command \"my-custom-cmd\"
+      {:ok true})
+
+  The generated port carries {:dap/command \"...\"} metadata; the
+  DAP adapter routes commands to it at dispatch time."
   [handler-name & args]
-  (let [command-name (clojure.core/name handler-name)
+  (let [cmd-key      (keyword (clojure.core/name handler-name))
+        spec-cmd     (spec/wire-command cmd-key)
+        command-name (or spec-cmd (clojure.core/name handler-name))
         [doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
         [options args] (if (and (map? (first args))
                                 (not (some #(and (keyword? %) (namespace %))
@@ -992,7 +1055,14 @@
 
 (defmethod sugar/create-adapter :dap
   [_protocol opts]
-  (create-dap-adapter opts))
+  ;; The DAP adapter doesn't pre-register port handlers the way LSP
+  ;; does — it routes per-dispatch via :port-registry in context.
+  ;; We attach the resolved registry to the adapter record's context
+  ;; closure indirectly through opts so test harnesses + transports
+  ;; can override it.
+  (let [registry (or (:registry opts) (deref #'sugar/*registry*))]
+    (-> (create-dap-adapter opts)
+        (assoc ::default-registry registry))))
 
 (defn run!
   "Start a DAP server on the given transport.
