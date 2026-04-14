@@ -202,6 +202,37 @@
 ;; Auto-derived capabilities
 ;; ============================================================================
 
+;; ============================================================================
+;; didSave handling
+;; ============================================================================
+
+(deftest test-did-save-notification-without-text
+  (testing "didSave is dispatched as a notification, no error"
+    (let [reg (fresh-registry)
+          adapter (build-adapter reg)]
+      (lsp/register-document-sync-handlers! adapter)
+      (let [result (core/protocol-dispatch adapter "textDocument/didSave"
+                     {:textDocument {:uri "file:///a.clj"}} {})]
+        (is (nil? result))))))
+
+(deftest test-did-save-with-include-text-syncs-document
+  (testing "when the client sends :text, the document store is updated"
+    (let [reg (fresh-registry)
+          adapter (build-adapter reg)
+          doc-store (:document-store adapter)]
+      (lsp/register-document-sync-handlers! adapter)
+      ;; Open first so the store has a doc
+      (core/protocol-dispatch adapter "textDocument/didOpen"
+        {:textDocument {:uri "file:///b.clj"
+                        :languageId "clojure"
+                        :version 1
+                        :text "(ns old)"}} {})
+      (core/protocol-dispatch adapter "textDocument/didSave"
+        {:textDocument {:uri "file:///b.clj" :version 2}
+         :text "(ns new)"} {})
+      (let [doc (lsp/doc-get doc-store "file:///b.clj")]
+        (is (= "(ns new)" (:content doc)))))))
+
 (deftest test-capabilities-auto-derive-from-registry
   (testing "deflsp hover + references implies hoverProvider + referencesProvider"
     (let [reg (fresh-registry)]

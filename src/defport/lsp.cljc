@@ -686,6 +686,7 @@
 (def m:exit (method-name :lifecycle :exit))
 (def m:did-open (method-name :text-sync :did-open))
 (def m:did-change (method-name :text-sync :did-change))
+(def m:did-save (method-name :text-sync :did-save))
 (def m:did-close (method-name :text-sync :did-close))
 (def m:completion (method-name :language :completion))
 (def m:hover (method-name :language :hover))
@@ -1338,6 +1339,24 @@
       (doc-change doc-store uri contentChanges version)
       nil)))
 
+(defn default-did-save-handler
+  "Default textDocument/didSave handler.
+
+   LSP sends didSave as a notification after the document was saved.
+   If the server declared `save: {includeText: true}` in its
+   textDocumentSync capabilities, the client also ships the new text
+   and we sync it into the document store. Otherwise it's a pure
+   metadata event — we just tap> and return."
+  [_adapter]
+  (fn [params context]
+    (let [{:keys [textDocument text]} params
+          uri (:uri textDocument)
+          doc-store (:document-store context)]
+      (when (and text doc-store)
+        (doc-change doc-store uri [{:text text}] (:version textDocument)))
+      (tap> {:event :lsp/did-save :uri uri :include-text? (some? text)})
+      nil)))
+
 (defn default-did-close-handler
   "Default textDocument/didClose handler."
   [_adapter]
@@ -1363,6 +1382,7 @@
   (doto adapter
     (register-method! m:did-open (default-did-open-handler adapter))
     (register-method! m:did-change (default-did-change-handler adapter))
+    (register-method! m:did-save (default-did-save-handler adapter))
     (register-method! m:did-close (default-did-close-handler adapter))))
 
 (defn register-default-handlers!
