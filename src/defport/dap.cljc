@@ -44,6 +44,7 @@
                (when (and (map? e) (= (namespace (:event e)) \"dap\"))
                  (record-metric! e))))"
   (:require [defport.core :as core]
+            [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]))
 
 ;; ============================================================================
@@ -941,3 +942,71 @@
 ;;
 ;; On Node/CLJS the equivalent would be a separate defport.dap-client-node
 ;; namespace using child_process — not yet implemented.
+
+;; ============================================================================
+;; Progressive-disclosure DSL — defcommand / run!
+;; ============================================================================
+;;
+;; Thin wrapper that registers a port with {:dap/command "..."} metadata.
+;; The handler receives a context whose :params is the DAP `arguments`
+;; map. The sugar only stamps metadata and delegates port registration
+;; to defport.sugar/define-port — dispatch-time routing from
+;; DAP commands to ports is Step 4 (DAP honest-done pass) work.
+;;
+;; Usage:
+;;   (require '[defport.dap :refer [defcommand run!]])
+;;
+;;   (defcommand evaluate
+;;     "Evaluate an expression in the current frame."
+;;     [expression :- :string frameId :- :int]
+;;     {:result (str "=> " expression) :variablesReference 0})
+
+(defmacro defcommand
+  "Define a DAP command handler.
+
+  The handler-name is a symbol; its name is used as the DAP command
+  string (e.g. `evaluate`, `continue`, `setBreakpoints`). Parameters
+  are pulled flat from the DAP `arguments` map.
+
+  Usage:
+    (defcommand evaluate
+      \"Evaluate an expression.\"
+      [expression :- :string frameId :- :int]
+      {:result (str \"=> \" expression)})
+
+  The generated port carries {:dap/command \"evaluate\"} metadata."
+  [handler-name & args]
+  (let [command-name (clojure.core/name handler-name)
+        [doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        [options args] (if (and (map? (first args))
+                                (not (some #(and (keyword? %) (namespace %))
+                                           (keys (first args)))))
+                         [(first args) (rest args)] [{} args])
+        [params body] [(first args) (rest args)]]
+    `(sugar/define-port ~handler-name
+       ~@(when doc [doc])
+       ~options
+       {:dap/command ~command-name}
+       ~params
+       ~@body)))
+
+(defmethod sugar/create-adapter :dap
+  [_protocol opts]
+  (create-dap-adapter opts))
+
+(defn run!
+  "Start a DAP server on the given transport.
+
+  Opts:
+    :server-info  - {:name ... :version ...}
+    :backend      - :repl | :nrepl | :flowstorm | :jdi | :proxy
+    :backend-opts - backend-specific map
+    :transport    - :stdio (default) or a pre-built Transport
+    :registry     - PortRegistry instance (default: defport.sugar/*registry*)"
+  [opts]
+  (sugar/run! (assoc opts :protocol :dap)))
+
+(defn stop!
+  "Stop a DAP server started with run!."
+  [server]
+  (sugar/stop! server))

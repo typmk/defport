@@ -37,6 +37,7 @@
    ## Spec Reference
    https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/"
   (:require [defport.core :as core]
+            [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]
             [clojure.string :as str])
   #?(:clj (:import [java.net URLDecoder URLEncoder]
@@ -1496,5 +1497,204 @@
     (register-method! adapter method (create-port-handler port-def)))
   adapter)
 
-;; Note: expose-port! is provided by the lsp convenience namespace (src/lsp.cljc)
-;; which offers a user-friendlier API with :as keyword mapping.
+;; ============================================================================
+;; Progressive-disclosure DSL — deflsp / defhandler / run!
+;; ============================================================================
+;;
+;; Thin wrappers that register ports with {:lsp/method "..."} metadata
+;; and do LSP-specific context extraction (position / range / URI)
+;; from raw LSP params. Uses defport.sugar helpers for param parsing
+;; and schema generation.
+;;
+;; Usage:
+;;   (require '[defport.lsp :refer [deflsp run!]])
+;;
+;;   (deflsp hover [uri :- :string line :- :int col :- :int]
+;;     \"Return hover info at the given position.\"
+;;     {:contents {:kind \"markdown\" :value (str \"Line \" line)}})
+;;
+;;   (run! {:server-info {:name \"my-lsp\" :version \"1.0\"}
+;;          :transport :stdio})
+
+(def ^:private sugar-method-lookup
+  "Map handler keywords to LSP method strings for the sugar DSL."
+  {:hover                   "textDocument/hover"
+   :definition              "textDocument/definition"
+   :declaration             "textDocument/declaration"
+   :type-definition         "textDocument/typeDefinition"
+   :implementation          "textDocument/implementation"
+   :references              "textDocument/references"
+   :completion              "textDocument/completion"
+   :signature-help          "textDocument/signatureHelp"
+   :document-symbol         "textDocument/documentSymbol"
+   :workspace-symbol        "workspace/symbol"
+   :code-action             "textDocument/codeAction"
+   :code-lens               "textDocument/codeLens"
+   :formatting              "textDocument/formatting"
+   :range-formatting        "textDocument/rangeFormatting"
+   :rename                  "textDocument/rename"
+   :prepare-rename          "textDocument/prepareRename"
+   :folding-range           "textDocument/foldingRange"
+   :selection-range         "textDocument/selectionRange"
+   :document-highlight      "textDocument/documentHighlight"
+   :document-link           "textDocument/documentLink"
+   :semantic-tokens         "textDocument/semanticTokens/full"
+   :inlay-hint              "textDocument/inlayHint"
+   :call-hierarchy-prepare  "textDocument/prepareCallHierarchy"
+   :call-hierarchy-incoming "callHierarchy/incomingCalls"
+   :call-hierarchy-outgoing "callHierarchy/outgoingCalls"})
+
+(def ^:private sugar-position-methods
+  "Handler keywords that operate on a position (uri + line + col)."
+  #{:hover :definition :declaration :type-definition :implementation
+    :references :completion :signature-help :document-highlight
+    :inlay-hint :call-hierarchy-prepare :prepare-rename})
+
+(def ^:private sugar-range-methods
+  "Handler keywords that operate on a range (uri + range)."
+  #{:code-action :range-formatting :selection-range})
+
+(def ^:private sugar-document-methods
+  "Handler keywords that operate on a whole document (uri)."
+  #{:document-symbol :formatting :code-lens :folding-range
+    :document-link :semantic-tokens})
+
+(defn- sugar-shape-form
+  "Return a form that, given the raw LSP params, returns a flat map
+   with the extracted shape for this method kind (uri, line, col, range,
+   query, new-name). The user's named params are then looked up by
+   keyword from this extracted map."
+  [method-key raw-params-form]
+  (cond
+    (contains? sugar-position-methods method-key)
+    `{:uri (get-in ~raw-params-form [:textDocument :uri])
+      :line (get-in ~raw-params-form [:position :line])
+      :col (get-in ~raw-params-form [:position :character])}
+
+    (contains? sugar-range-methods method-key)
+    `{:uri (get-in ~raw-params-form [:textDocument :uri])
+      :range (:range ~raw-params-form)}
+
+    (contains? sugar-document-methods method-key)
+    `{:uri (get-in ~raw-params-form [:textDocument :uri])}
+
+    (= :workspace-symbol method-key)
+    `{:query (:query ~raw-params-form)}
+
+    (= :rename method-key)
+    `{:uri (get-in ~raw-params-form [:textDocument :uri])
+      :line (get-in ~raw-params-form [:position :line])
+      :col (get-in ~raw-params-form [:position :character])
+      :new-name (:newName ~raw-params-form)}
+
+    :else raw-params-form))
+
+(defmacro deflsp
+  "Define an LSP handler for a well-known method.
+
+  The handler-name is a keyword-like symbol that maps to an LSP method
+  string (see sugar-method-lookup). Position/range/document-URI are
+  extracted from the raw LSP params before the body runs; name your
+  parameters with the conventional keys:
+
+  - Position methods (hover, definition, references, ...):
+      [uri :- :string line :- :int col :- :int]
+
+  - Range methods (code-action, range-formatting, ...):
+      [uri :- :string range :- :map]
+
+  - Document methods (document-symbol, formatting, ...):
+      [uri :- :string]
+
+  - Workspace-symbol:
+      [query :- :string]
+
+  - Rename:
+      [uri :- :string line :- :int col :- :int new-name :- :string]
+
+  Usage:
+    (deflsp hover [uri :- :string line :- :int col :- :int]
+      \"Return hover info\"
+      {:contents {:kind \"markdown\" :value (str \"At \" uri \":\" line)}})
+
+  The generated port carries {:lsp/method \"textDocument/hover\"}
+  metadata; the LSP adapter routes requests to it at dispatch time."
+  [handler-name params & body]
+  (let [method-key (keyword (clojure.core/name handler-name))
+        method-str (or (get sugar-method-lookup method-key)
+                       (throw (ex-info (str "Unknown LSP method: " method-key
+                                            ". Use defhandler for custom methods.")
+                                       {:method method-key})))
+        [doc body] (sugar/extract-doc-and-body body)
+        parsed (sugar/parse-params params)
+        schema (sugar/params->json-schema parsed)
+        pnames (mapv :name (:params parsed))
+        ctx-name (:context-name parsed)
+        raw-sym (gensym "raw-params__")
+        extracted-sym (gensym "extracted__")
+        ctx-sym (gensym "context__")]
+    `(let [handler# (fn [~ctx-sym]
+                      (let [~raw-sym (:params ~ctx-sym)
+                            ~extracted-sym ~(sugar-shape-form method-key raw-sym)
+                            ~@(when ctx-name [ctx-name ctx-sym])
+                            ~@(mapcat (fn [n]
+                                        [n `(get ~extracted-sym ~(keyword (clojure.core/name n)))])
+                                      pnames)]
+                        ~@body))
+           port# {:id ~(keyword (clojure.core/name handler-name))
+                  :name ~(clojure.core/name handler-name)
+                  :description ~(or doc "")
+                  :input-schema ~schema
+                  :handler handler#
+                  :metadata {:lsp/method ~method-str}}]
+       (core/register-port! sugar/*registry* port#)
+       port#)))
+
+(defmacro defhandler
+  "Define an LSP handler for an arbitrary method string.
+
+  Useful when the method isn't in the standard sugar-method-lookup
+  table, or when you want full control over the params shape.
+
+  Usage:
+    (defhandler \"textDocument/semanticTokens/full\"
+      [uri :- :string]
+      \"Return semantic tokens\"
+      {:data [...]})"
+  [method-string params & body]
+  (let [[doc body] (sugar/extract-doc-and-body body)]
+    `(sugar/define-port ~(symbol (str "lsp-handler-" (hash method-string)))
+       ~@(when doc [doc])
+       {:lsp/method ~method-string}
+       ~params
+       ~@body)))
+
+;; ============================================================================
+;; Adapter multimethod registration
+;; ============================================================================
+
+(defmethod sugar/create-adapter :lsp
+  [_protocol opts]
+  (let [adapter (create-adapter opts)]
+    ;; Auto-register any ports that carry :lsp/method metadata
+    (register-ports! adapter)
+    adapter))
+
+;; ============================================================================
+;; Top-level run! / stop!
+;; ============================================================================
+
+(defn run!
+  "Start an LSP server on the given transport.
+
+  Opts:
+    :server-info - {:name ... :version ...}
+    :transport   - :stdio (default) or a pre-built Transport
+    :registry    - PortRegistry instance (default: defport.sugar/*registry*)"
+  [opts]
+  (sugar/run! (assoc opts :protocol :lsp)))
+
+(defn stop!
+  "Stop an LSP server started with run!."
+  [server]
+  (sugar/stop! server))
