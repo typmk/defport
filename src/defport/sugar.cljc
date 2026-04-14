@@ -481,6 +481,71 @@
                        "to register the appropriate adapter.")
                   {:protocol protocol})))
 
+;; ============================================================================
+;; Protocol-aware handler wrapping for run!
+;; ============================================================================
+;;
+;; Each protocol has its own on-the-wire message shape:
+;;
+;; - MCP / LSP use JSON-RPC 2.0:
+;;       inbound  {:jsonrpc \"2.0\" :id N :method \"foo\" :params {...}}
+;;       outbound {:jsonrpc \"2.0\" :id N :result {...}}
+;;                or {:jsonrpc \"2.0\" :id N :error {...}}
+;;
+;; - DAP has its own envelope:
+;;       inbound  {:seq N :type \"request\" :command \"foo\" :arguments {...}}
+;;       outbound {:seq N :type \"response\" :request_seq N
+;;                 :success true :command \"foo\" :body {...}}
+;;
+;; sugar/run! wraps the raw protocol-dispatch output in the right
+;; envelope automatically. Handlers at the transport level never need
+;; to know which protocol they're talking.
+
+(defn- jsonrpc-handler
+  "Build a stdio handler that speaks JSON-RPC 2.0. Used for MCP and
+   LSP. Dispatches to the adapter using (:method msg)/(:params msg)
+   and wraps the body in a JSON-RPC response envelope."
+  [adapter registry]
+  (fn [msg]
+    (let [result (core/protocol-dispatch adapter
+                                         (:method msg)
+                                         (:params msg)
+                                         {:port-registry registry
+                                          :request msg})]
+      (when (:id msg)                          ;; notifications get no response
+        (merge {:jsonrpc "2.0" :id (:id msg)}
+               (if (and (map? result) (contains? result :error))
+                 {:error (:error result)}
+                 {:result result}))))))
+
+(defn- dap-handler
+  "Build a stdio handler that speaks DAP. Dispatches on (:command msg)
+   passing the whole msg so the adapter can pull :arguments; wraps
+   the body in a DAP response envelope."
+  [adapter registry]
+  (fn [msg]
+    (let [result (core/protocol-dispatch adapter
+                                         (:command msg)
+                                         msg
+                                         {:port-registry registry
+                                          :request msg})
+          body   (if (and (map? result) (contains? result :result))
+                   (:result result)
+                   result)]
+      (when (:seq msg)
+        {:seq 0
+         :type "response"
+         :request_seq (:seq msg)
+         :success true
+         :command (:command msg)
+         :body body}))))
+
+(defn- build-handler [protocol adapter registry]
+  (case protocol
+    (:mcp :lsp) (jsonrpc-handler adapter registry)
+    :dap        (dap-handler adapter registry)
+    (throw (ex-info "Unknown protocol for run!" {:protocol protocol}))))
+
 (defn run!
   "Start a server speaking one protocol on one transport.
 
@@ -488,32 +553,36 @@
     :protocol    - :mcp, :lsp, or :dap (required)
     :transport   - :stdio, :http, or a pre-built Transport (default :stdio)
     :port        - HTTP port (for :http transport, default 8080)
-    :server-info - {:name ... :version ...} (passed to the adapter)
+    :server-info - {:name ... :version ...} passed to the adapter
     :registry    - PortRegistry instance (default: *registry*)
+    :transport-opts - map forwarded to the transport constructor
 
-  For multi-protocol servers, instantiate adapters and transports
-  directly; this convenience is for the single-protocol common case.
+  Behavior:
+    - Wraps the raw protocol-dispatch output in the correct JSON-RPC /
+      DAP response envelope automatically. The transport-level handler
+      never needs to know which protocol it speaks.
+    - stdio transports are created with :drain-on-exit? true so a
+      cold JVM subprocess doesn't lose its last response on exit.
+    - LSP adapters have their lifecycle + document-sync defaults
+      registered automatically (you don't need to call
+      lsp/register-default-handlers! yourself).
 
-  Returns a map {:adapter ... :transport ... :registry ...} so
-  callers can stop! it later."
-  [{:keys [protocol transport port server-info registry]
+  Returns a map {:adapter :transport :registry :protocol} so callers
+  can stop! it later."
+  [{:keys [protocol transport port server-info registry transport-opts]
     :or   {transport :stdio port 8080}
     :as   opts}]
   (when-not protocol
     (throw (ex-info "run! requires :protocol" {:opts opts})))
   (let [registry (or registry *registry*)
         adapter  (create-adapter protocol (assoc opts :server-info server-info))
-        handler  (fn [request]
-                   (core/protocol-dispatch adapter
-                                           (:method request)
-                                           (:params request)
-                                           {:port-registry registry
-                                            :transport nil
-                                            :request request}))
+        handler  (build-handler protocol adapter registry)
+        stdio-opts (merge {:drain-on-exit? true} transport-opts)
         t        (cond
                    (satisfies? core/Transport transport) transport
-                   (= transport :stdio) (stdio-transport/create-stdio-transport)
-                   (= transport :http)  (http-transport/create-http-transport {:port port})
+                   (= transport :stdio) (stdio-transport/create-stdio-transport stdio-opts)
+                   (= transport :http)  (http-transport/create-http-transport
+                                          (merge {:port port} transport-opts))
                    :else (throw (ex-info "Unknown transport type" {:transport transport})))]
     (core/transport-start t handler)
     {:adapter adapter :transport t :registry registry :protocol protocol}))

@@ -1748,41 +1748,53 @@
 (defmacro deflsp
   "Define an LSP handler for a well-known method.
 
-  The handler-name is a symbol whose keyword form is looked up in
+  Accepts Clojure-convention docstring-first:
+
+      (deflsp hover \"Return hover info.\"
+        [uri :- :string line :- :int col :- :int]
+        {:contents {:kind \"markdown\" :value (str \"At \" uri \":\" line)}})
+
+  Also accepts the legacy docstring-in-body shape for backward
+  compatibility:
+
+      (deflsp hover
+        [uri :- :string line :- :int col :- :int]
+        \"Return hover info.\"
+        {:contents ...})
+
+  The handler-name's keyword form is looked up in
   defport.lsp.spec/methods. The spec entry tells the macro which
-  wire-method string to attach, which sugar shape to extract from
-  the raw LSP params, and which capability the port implies.
+  wire-method string to attach, which sugar shape to extract, and
+  which capability the port implies.
 
-  Sugar shapes (read from spec/sugar at expansion time):
+  Sugar shapes (read from spec at expansion time):
+  - :position   — [uri :- :string line :- :int col :- :int]
+  - :range      — [uri :- :string range :- :map]
+  - :document   — [uri :- :string]
+  - :workspace-symbol — [query :- :string]
+  - :rename     — [uri line col new-name]
+  - :raw        — passthrough
 
-  - :position methods (hover, definition, references, ...):
-      [uri :- :string line :- :int col :- :int]
-  - :range methods (code-action, range-formatting, ...):
-      [uri :- :string range :- :map]
-  - :document methods (document-symbol, formatting, ...):
-      [uri :- :string]
-  - :workspace-symbol:
-      [query :- :string]
-  - :rename:
-      [uri :- :string line :- :int col :- :int new-name :- :string]
-  - :raw (default for anything without a known shape): the handler
-    receives the raw LSP params map under any param name you choose.
-
-  Usage:
-    (deflsp hover [uri :- :string line :- :int col :- :int]
-      \"Return hover info\"
-      {:contents {:kind \"markdown\" :value (str \"At \" uri \":\" line)}})
-
-  The generated port carries {:lsp/method \"textDocument/hover\"}
+  The generated port carries {:lsp/method \"textDocument/...\"}
   metadata; the LSP adapter routes requests to it at dispatch time."
-  [handler-name params & body]
-  (let [method-key (keyword (clojure.core/name handler-name))
+  [handler-name & more]
+  (let [;; Accept either (deflsp name \"doc\" [params] body...) or the
+        ;; legacy (deflsp name [params] \"doc\" body...).
+        [leading-doc more] (if (string? (first more))
+                             [(first more) (rest more)]
+                             [nil more])
+        params             (first more)
+        body               (rest more)
+        [trailing-doc body] (if (and (nil? leading-doc) (string? (first body)))
+                              [(first body) (rest body)]
+                              [nil body])
+        doc                (or leading-doc trailing-doc)
+        method-key (keyword (clojure.core/name handler-name))
         entry      (spec/method-for method-key)
         method-str (or (:method entry)
                        (throw (ex-info (str "Unknown LSP method: " method-key
                                             ". Use defhandler for custom methods.")
                                        {:method method-key})))
-        [doc body] (sugar/extract-doc-and-body body)
         parsed     (sugar/parse-params params)
         schema     (sugar/params->json-schema parsed)
         pnames     (mapv :name (:params parsed))
@@ -1833,10 +1845,15 @@
 (defmethod sugar/create-adapter :lsp
   [_protocol opts]
   (let [registry (or (:registry opts) (deref #'sugar/*registry*))
-        ;; Merge auto-computed capabilities under user-supplied ones
+        ;; Merge auto-computed capabilities under user-supplied ones.
         derived (capabilities-from-registry registry)
         opts'   (update opts :capabilities #(merge derived %))
         adapter (create-adapter opts')]
+    ;; Lifecycle (initialize/initialized/shutdown/exit) + document
+    ;; sync (didOpen/didChange/didSave/didClose) defaults. Doing this
+    ;; here means consumers don't have to remember to call
+    ;; register-default-handlers! — the LSP adapter boots complete.
+    (register-default-handlers! adapter)
     ;; Auto-register any ports that carry :lsp/method metadata
     (register-ports! adapter registry)
     adapter))

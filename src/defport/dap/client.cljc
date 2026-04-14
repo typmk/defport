@@ -248,24 +248,34 @@
 (defn connect-async!
   "Cross-platform: start the transport, drive `initialize`, callback
    with [client capabilities] or [nil error]. Does NOT launch or
-   attach — caller does that with launch! or attach!."
+   attach — caller does that with launch! or attach!.
+
+   Opts (shared shape across all defport protocol clients):
+     :client-info  — {:name \"my-client\" :version \"0.1.0\"}
+                     used for both :clientID and :clientName on the wire.
+     :adapter-id   — DAP-specific adapter identifier string (default \"defport\")
+     :capabilities — client capabilities override map merged over defaults
+     :initialize   — DEPRECATED alias for :capabilities; kept for compat."
   [^Client client opts callback]
   (transport-start! (:transport client))
   (start-driver! client)
-  (let [args (merge {:clientID "defport-dap-client"
-                     :clientName "defport"
-                     :adapterID (:adapter-id opts "defport")
-                     :pathFormat "path"
-                     :linesStartAt1 true
-                     :columnsStartAt1 true
-                     :supportsRunInTerminalRequest false
-                     :supportsStartDebuggingRequest false
-                     :supportsVariableType true
-                     :supportsVariablePaging false
-                     :supportsMemoryReferences false
-                     :supportsProgressReporting false
-                     :supportsInvalidatedEvent false}
-                    (:initialize opts))]
+  (let [{:keys [client-info adapter-id capabilities]
+         :or   {client-info {:name "defport-dap-client" :version "0.1.0"}
+                adapter-id  "defport"}} opts
+        default-args {:clientID (:name client-info)
+                      :clientName (:name client-info)
+                      :adapterID adapter-id
+                      :pathFormat "path"
+                      :linesStartAt1 true
+                      :columnsStartAt1 true
+                      :supportsRunInTerminalRequest false
+                      :supportsStartDebuggingRequest false
+                      :supportsVariableType true
+                      :supportsVariablePaging false
+                      :supportsMemoryReferences false
+                      :supportsProgressReporting false
+                      :supportsInvalidatedEvent false}
+        args (merge default-args capabilities (:initialize opts))]
     (then (request! client (spec/wire-command :initialize) args)
           (fn [body error]
             (if error

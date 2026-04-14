@@ -123,11 +123,34 @@
     "Dispatch an incoming protocol method (server role).
 
     method - Protocol method name (string, e.g. 'tools/call', 'textDocument/completion')
-    params - Method parameters (map)
-    context - Execution context (port-registry, transport, metadata, system)
+    params - Method parameters (map) — for LSP/MCP this is the :params
+             of the JSON-RPC message; for DAP it's the entire inbound
+             message (which carries :arguments)
+    context - Execution context map. Keys vary by protocol but the
+              following are common and stable:
+
+                :port-registry  — the PortRegistry instance the adapter
+                                  should walk to find tools/commands/
+                                  handlers. Injected automatically by
+                                  `sugar/create-adapter` from the sugar
+                                  registry.
+                :request        — the full inbound message (for
+                                  transports that want to inspect
+                                  envelope fields like :id or :seq).
+                :id             — the JSON-RPC request id (LSP/MCP).
+                :state*         — the adapter's state atom (MCP, LSP).
+                :transport      — the Transport instance, if the caller
+                                  wants to push notifications out.
+
+              Protocol-specific additions:
+
+                MCP: :refactoring-enabled? :tool-filter
+                     :enable-subscriptions? :performance :uri-scheme
+                LSP: :document-store :adapter :request-id :progress-token
+                DAP: :adapter-state :backend-type :backend-opts :server-info
 
     Returns:
-    - Success: {:result <data>}
+    - Success: {:result <data>} or the raw body depending on protocol
     - Error: {:error {:code <int> :message <str> :data <any>}}"))
 
 (defprotocol ProtocolClient
