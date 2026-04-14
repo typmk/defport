@@ -63,11 +63,13 @@ The **capability layer** (functions over a domain model that are exposed through
 - **HTTP**: concurrency lives in the transport (thread pool on JVM, event loop on Node). Defport's core still sees one request at a time.
 - Defport dispatch is a synchronous function from one request to one response. Concurrency *around* it is somebody else's problem.
 
-### 5. The server/client asymmetry
+### 5. The server/client asymmetry — pluggable platform primitives
 
 - **Server-side defport** is fully synchronous and fully cross-platform. Node's `process.stdin.on('data', ...)` callbacks run synchronously in their body; no async machinery is needed.
-- **Client-side defport does not ship.** The `ProtocolClient` protocol exists in `defport.core` as a *contract*; implementations belong in consumer code. A consumer that genuinely needs client role — spawning an external MCP server, proxying LSP traffic to rust-analyzer, observing a live DAP debug session — writes the `ProtocolClient` implementation in its own codebase using `babashka.process` / `ProcessBuilder` / Node `child_process`. Defnet is the canonical consumer; its DAP proxy lives in defnet, not here.
-- The one place a platform semantic gap is real — Node cannot block the event loop while waiting on a subprocess — is isolated to that consumer-side code, not defport's.
+- **Client-side defport ships the protocol-free 80%.** Request/response correlation by id, notification dispatch, initialize/shutdown handshakes, typed convenience helpers (`hover-at`, `definition-at`, `next`, `step-in`, etc.), error mapping. All of this is platform-free Clojure and lives in `defport.lsp.client` / `defport.dap.client` / `defport.mcp.client`.
+- **The 20% that's genuinely platform-specific is a small protocol consumers plug in.** A `ClientTransport` (or per-protocol equivalent) describes `start!` / `send!` / `recv!` / `stop!`. Defport ships *reference transports* in optional namespaces — `defport.lsp.client.transports.subprocess-jvm` (uses `ProcessBuilder`) and `defport.lsp.client.transports.subprocess-node` (uses `child_process.spawn`) — both behind one constructor function. Consumers who want raw sockets, in-process pipes, WebSockets, or proxied transports write their own.
+- This honors the original load-bearing constraint (Node cannot block the event loop while waiting on a subprocess) by keeping the platform glue at the edge in optional namespaces and making the core client logic platform-free.
+- **Defnet is still the canonical consumer**, but its job shrinks to "construct a transport (or use the bundled one) and plug in domain logic." Its DAP backend integration (nREPL/FlowStorm/JDI) still lives in defnet — defport ships the protocol routing, defnet ships what `next` and `step-in` actually mean.
 
 ### 6. Reader conditionals are for structural platform gaps only
 

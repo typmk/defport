@@ -37,6 +37,7 @@
    ## Spec Reference
    https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/"
   (:require [defport.core :as core]
+            [defport.lsp.spec :as spec]
             [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]
             [clojure.string :as str])
@@ -1575,46 +1576,20 @@
     ;; Default: return as-is
     result))
 
-(def ^:private method->capability-key
-  "LSP method string → ServerCapabilities key to enable when a port
-   claims that method. Covers the core methods register-ports! can
-   route — extend as more defaults land."
-  {"textDocument/hover"              :hoverProvider
-   "textDocument/definition"         :definitionProvider
-   "textDocument/declaration"        :declarationProvider
-   "textDocument/typeDefinition"     :typeDefinitionProvider
-   "textDocument/implementation"     :implementationProvider
-   "textDocument/references"         :referencesProvider
-   "textDocument/documentSymbol"     :documentSymbolProvider
-   "textDocument/documentHighlight"  :documentHighlightProvider
-   "textDocument/rename"             :renameProvider
-   "textDocument/prepareRename"      :renameProvider
-   "textDocument/codeAction"         :codeActionProvider
-   "textDocument/codeLens"           :codeLensProvider
-   "textDocument/formatting"         :documentFormattingProvider
-   "textDocument/rangeFormatting"    :documentRangeFormattingProvider
-   "textDocument/foldingRange"       :foldingRangeProvider
-   "textDocument/selectionRange"     :selectionRangeProvider
-   "textDocument/signatureHelp"      :signatureHelpProvider
-   "textDocument/completion"         :completionProvider
-   "textDocument/inlayHint"          :inlayHintProvider
-   "textDocument/semanticTokens/full" :semanticTokensProvider
-   "workspace/symbol"                :workspaceSymbolProvider})
-
 (defn capabilities-from-registry
   "Walk a PortRegistry and return a ServerCapabilities fragment that
-   enables each provider for which at least one port has claimed the
-   corresponding LSP method via :lsp/method metadata.
+   enables each provider whose method some port has claimed via
+   :lsp/method metadata. Resolves method strings → handler-name →
+   capability key through defport.lsp.spec — single source of truth.
 
-   Static user-supplied capabilities take precedence when merged —
-   this fragment only enables providers the user hasn't already
-   configured."
+   Static user-supplied capabilities take precedence when merged."
   [port-registry]
   (reduce (fn [caps port-def]
-            (if-let [cap-key (get method->capability-key
-                                  (get-in port-def [:metadata :lsp/method]))]
-              (update caps cap-key (fn [existing] (or existing {})))
-              caps))
+            (let [method-str (get-in port-def [:metadata :lsp/method])
+                  handler-k  (spec/handler-name-for method-str)]
+              (if-let [cap-key (and handler-k (spec/capability-key handler-k))]
+                (update caps cap-key (fn [existing] (or existing {})))
+                caps)))
           {}
           (core/list-ports port-registry)))
 
@@ -1736,101 +1711,62 @@
 ;;   (run! {:server-info {:name \"my-lsp\" :version \"1.0\"}
 ;;          :transport :stdio})
 
-(def ^:private sugar-method-lookup
-  "Map handler keywords to LSP method strings for the sugar DSL."
-  {:hover                   "textDocument/hover"
-   :definition              "textDocument/definition"
-   :declaration             "textDocument/declaration"
-   :type-definition         "textDocument/typeDefinition"
-   :implementation          "textDocument/implementation"
-   :references              "textDocument/references"
-   :completion              "textDocument/completion"
-   :signature-help          "textDocument/signatureHelp"
-   :document-symbol         "textDocument/documentSymbol"
-   :workspace-symbol        "workspace/symbol"
-   :code-action             "textDocument/codeAction"
-   :code-lens               "textDocument/codeLens"
-   :formatting              "textDocument/formatting"
-   :range-formatting        "textDocument/rangeFormatting"
-   :rename                  "textDocument/rename"
-   :prepare-rename          "textDocument/prepareRename"
-   :folding-range           "textDocument/foldingRange"
-   :selection-range         "textDocument/selectionRange"
-   :document-highlight      "textDocument/documentHighlight"
-   :document-link           "textDocument/documentLink"
-   :semantic-tokens         "textDocument/semanticTokens/full"
-   :inlay-hint              "textDocument/inlayHint"
-   :call-hierarchy-prepare  "textDocument/prepareCallHierarchy"
-   :call-hierarchy-incoming "callHierarchy/incomingCalls"
-   :call-hierarchy-outgoing "callHierarchy/outgoingCalls"})
-
-(def ^:private sugar-position-methods
-  "Handler keywords that operate on a position (uri + line + col)."
-  #{:hover :definition :declaration :type-definition :implementation
-    :references :completion :signature-help :document-highlight
-    :inlay-hint :call-hierarchy-prepare :prepare-rename})
-
-(def ^:private sugar-range-methods
-  "Handler keywords that operate on a range (uri + range)."
-  #{:code-action :range-formatting :selection-range})
-
-(def ^:private sugar-document-methods
-  "Handler keywords that operate on a whole document (uri)."
-  #{:document-symbol :formatting :code-lens :folding-range
-    :document-link :semantic-tokens})
-
 (defn- sugar-shape-form
-  "Return a form that, given the raw LSP params, returns a flat map
-   with the extracted shape for this method kind (uri, line, col, range,
-   query, new-name). The user's named params are then looked up by
-   keyword from this extracted map."
-  [method-key raw-params-form]
-  (cond
-    (contains? sugar-position-methods method-key)
-    `{:uri (get-in ~raw-params-form [:textDocument :uri])
-      :line (get-in ~raw-params-form [:position :line])
-      :col (get-in ~raw-params-form [:position :character])}
+  "Build the form that pulls flat params out of raw LSP params for a
+   given handler-name keyword. Reads the sugar shape from
+   defport.lsp.spec instead of carrying its own table.
 
-    (contains? sugar-range-methods method-key)
-    `{:uri (get-in ~raw-params-form [:textDocument :uri])
-      :range (:range ~raw-params-form)}
+   Only inlines the shapes the spec registry knows about — :raw is a
+   passthrough so :raw-shaped methods just see the raw params map."
+  [handler-name raw-params-form]
+  (let [entry (spec/method-for handler-name)
+        shape (or (:sugar entry) :raw)]
+    (case shape
+      :position
+      `{:uri  (get-in ~raw-params-form [:textDocument :uri])
+        :line (get-in ~raw-params-form [:position :line])
+        :col  (get-in ~raw-params-form [:position :character])}
 
-    (contains? sugar-document-methods method-key)
-    `{:uri (get-in ~raw-params-form [:textDocument :uri])}
+      :range
+      `{:uri   (get-in ~raw-params-form [:textDocument :uri])
+        :range (:range ~raw-params-form)}
 
-    (= :workspace-symbol method-key)
-    `{:query (:query ~raw-params-form)}
+      :document
+      `{:uri (get-in ~raw-params-form [:textDocument :uri])}
 
-    (= :rename method-key)
-    `{:uri (get-in ~raw-params-form [:textDocument :uri])
-      :line (get-in ~raw-params-form [:position :line])
-      :col (get-in ~raw-params-form [:position :character])
-      :new-name (:newName ~raw-params-form)}
+      :workspace-symbol
+      `{:query (:query ~raw-params-form)}
 
-    :else raw-params-form))
+      :rename
+      `{:uri      (get-in ~raw-params-form [:textDocument :uri])
+        :line     (get-in ~raw-params-form [:position :line])
+        :col      (get-in ~raw-params-form [:position :character])
+        :new-name (:newName ~raw-params-form)}
+
+      :raw raw-params-form)))
 
 (defmacro deflsp
   "Define an LSP handler for a well-known method.
 
-  The handler-name is a keyword-like symbol that maps to an LSP method
-  string (see sugar-method-lookup). Position/range/document-URI are
-  extracted from the raw LSP params before the body runs; name your
-  parameters with the conventional keys:
+  The handler-name is a symbol whose keyword form is looked up in
+  defport.lsp.spec/methods. The spec entry tells the macro which
+  wire-method string to attach, which sugar shape to extract from
+  the raw LSP params, and which capability the port implies.
 
-  - Position methods (hover, definition, references, ...):
+  Sugar shapes (read from spec/sugar at expansion time):
+
+  - :position methods (hover, definition, references, ...):
       [uri :- :string line :- :int col :- :int]
-
-  - Range methods (code-action, range-formatting, ...):
+  - :range methods (code-action, range-formatting, ...):
       [uri :- :string range :- :map]
-
-  - Document methods (document-symbol, formatting, ...):
+  - :document methods (document-symbol, formatting, ...):
       [uri :- :string]
-
-  - Workspace-symbol:
+  - :workspace-symbol:
       [query :- :string]
-
-  - Rename:
+  - :rename:
       [uri :- :string line :- :int col :- :int new-name :- :string]
+  - :raw (default for anything without a known shape): the handler
+    receives the raw LSP params map under any param name you choose.
 
   Usage:
     (deflsp hover [uri :- :string line :- :int col :- :int]
@@ -1841,18 +1777,19 @@
   metadata; the LSP adapter routes requests to it at dispatch time."
   [handler-name params & body]
   (let [method-key (keyword (clojure.core/name handler-name))
-        method-str (or (get sugar-method-lookup method-key)
+        entry      (spec/method-for method-key)
+        method-str (or (:method entry)
                        (throw (ex-info (str "Unknown LSP method: " method-key
                                             ". Use defhandler for custom methods.")
                                        {:method method-key})))
         [doc body] (sugar/extract-doc-and-body body)
-        parsed (sugar/parse-params params)
-        schema (sugar/params->json-schema parsed)
-        pnames (mapv :name (:params parsed))
-        ctx-name (:context-name parsed)
-        raw-sym (gensym "raw-params__")
+        parsed     (sugar/parse-params params)
+        schema     (sugar/params->json-schema parsed)
+        pnames     (mapv :name (:params parsed))
+        ctx-name   (:context-name parsed)
+        raw-sym       (gensym "raw-params__")
         extracted-sym (gensym "extracted__")
-        ctx-sym (gensym "context__")]
+        ctx-sym       (gensym "context__")]
     `(let [handler# (fn [~ctx-sym]
                       (let [~raw-sym (:params ~ctx-sym)
                             ~extracted-sym ~(sugar-shape-form method-key raw-sym)

@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [defport.core :as core]
             [defport.lsp :as lsp]
+            [defport.lsp.spec :as spec]
             [defport.registry :as registry]
             [defport.sugar :as sugar]))
 
@@ -268,6 +269,100 @@
                      {:rootUri "file:///proj" :capabilities {}}
                      {:port-registry reg})]
         (is (contains? (:capabilities result) :renameProvider))))))
+
+;; ============================================================================
+;; Spec-registry substrate
+;; ============================================================================
+
+(deftest test-spec-registry-is-source-of-truth
+  (testing "every method we route through register-ports! resolves through spec"
+    (is (= "textDocument/hover" (spec/wire-method :hover)))
+    (is (= "textDocument/references" (spec/wire-method :references)))
+    (is (= "workspace/symbol" (spec/wire-method :workspace-symbol)))
+    (is (= :hoverProvider (spec/capability-key :hover)))
+    (is (= :referencesProvider (spec/capability-key :references)))
+    (is (= :workspaceSymbolProvider (spec/capability-key :workspace-symbol)))
+    (is (spec/request? :hover))
+    (is (spec/notification? :did-open))
+    (is (spec/notification? :cancel-request))))
+
+(deftest test-spec-defaults-derive-empty-server
+  (testing "spec defaults give sensible empty responses with no ports registered"
+    (is (nil? ((spec/default-response :hover) {})))
+    (is (= [] ((spec/default-response :references) {})))
+    (is (= [] ((spec/default-response :document-symbol) {})))
+    (is (nil? ((spec/default-response :rename) {})))))
+
+(deftest test-handler-name-roundtrip-via-spec
+  (testing "spec/handler-name-for inverts spec/wire-method"
+    (doseq [hk (spec/all-handler-names)]
+      (let [wire (spec/wire-method hk)]
+        (is (= hk (spec/handler-name-for wire))
+            (str "method " wire " did not roundtrip through handler-name-for"))))))
+
+(deftest test-deflsp-uses-spec-sugar-shape
+  (testing "deflsp respects sugar shape declared in spec — code-action uses :range"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp code-action
+          [uri :- :string range :- :map]
+          {:got-uri uri :got-range range}))
+      (let [adapter (build-adapter reg)
+            rng     {:start {:line 1 :character 0} :end {:line 4 :character 10}}
+            result  (dispatch adapter "textDocument/codeAction"
+                              {:textDocument {:uri "file:///c.clj"}
+                               :range rng})]
+        (is (= {:got-uri "file:///c.clj" :got-range rng} result))))))
+
+(deftest test-substrate-stress-semantic-tokens
+  (testing "semantic-tokens (document shape, unusual response) routes via spec"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp semantic-tokens
+          [uri :- :string]
+          {:data [0 0 5 1 0   ;; (deltaLine deltaStart length type modifiers) × N
+                  1 2 3 2 0]}))
+      (let [adapter (build-adapter reg)
+            result  (dispatch adapter "textDocument/semanticTokens/full"
+                              {:textDocument {:uri "file:///s.clj"}})]
+        (is (= 10 (count (:data result))))
+        (let [caps (lsp/capabilities-from-registry reg)]
+          (is (contains? caps :semanticTokensProvider)))))))
+
+(deftest test-substrate-stress-call-hierarchy
+  (testing "call-hierarchy methods (raw shape, multi-step) route via spec"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp call-hierarchy-prepare
+          [uri :- :string line :- :int col :- :int]
+          [{:name "foo" :kind 12 :uri uri
+            :range {:start {:line line :character col}
+                    :end {:line line :character (+ col 3)}}}])
+        (lsp/deflsp call-hierarchy-incoming
+          [item :- :map]
+          [{:from item :fromRanges []}]))
+      (let [adapter (build-adapter reg)
+            prep    (dispatch adapter "textDocument/prepareCallHierarchy"
+                              {:textDocument {:uri "file:///c.clj"}
+                               :position {:line 5 :character 2}})
+            item    (first prep)]
+        (is (= "foo" (:name item)))
+        (let [incoming (dispatch adapter "callHierarchy/incomingCalls"
+                                 {:item item})]
+          (is (= "foo" (get-in (first incoming) [:from :name]))))
+        (let [caps (lsp/capabilities-from-registry reg)]
+          (is (contains? caps :callHierarchyProvider)))))))
+
+(deftest test-capabilities-derive-via-spec-only
+  (testing "capabilities-from-registry resolves through spec, not a private table"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp folding-range [uri :- :string] [])
+        (lsp/deflsp signature-help [uri :- :string line :- :int col :- :int] nil))
+      (let [caps (lsp/capabilities-from-registry reg)]
+        (is (contains? caps :foldingRangeProvider))
+        (is (contains? caps :signatureHelpProvider))
+        (is (not (contains? caps :hoverProvider)))))))
 
 (deftest test-legacy-lsp-metadata-still-routes
   (testing "a port with nested :lsp {:method ...} metadata routes through
