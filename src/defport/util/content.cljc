@@ -9,8 +9,8 @@
 
   Platform-agnostic with reader conditionals for JVM and Node.js."
   (:require [clojure.string :as str]
-            #?(:clj [clojure.java.io :as io]))
-  #?(:cljs (:require-macros [defport.util.content :refer [base64-encode base64-decode]])))
+            [defport.util.platform :as platform]
+            #?(:clj [clojure.java.io :as io])))
 
 ;; =============================================================================
 ;; Base64 Encoding/Decoding
@@ -34,13 +34,7 @@
     (base64-encode (.getBytes \"hello\"))
     ;; => \"aGVsbG8=\""
   [data]
-  #?(:clj (-> (java.util.Base64/getEncoder)
-              (.encodeToString data))
-     :cljs (if (exists? js/Buffer)
-             ;; Node.js environment
-             (.toString (.from js/Buffer data) "base64")
-             ;; Browser environment (future)
-             (js/btoa (apply str (map char data))))))
+  (platform/base64-encode data))
 
 (defn base64-decode
   "Decode Base64 string to binary data.
@@ -55,14 +49,7 @@
     (base64-decode \"aGVsbG8=\")
     ;; => byte array representing \"hello\""
   [base64-str]
-  #?(:clj (-> (java.util.Base64/getDecoder)
-              (.decode base64-str))
-     :cljs (if (exists? js/Buffer)
-             ;; Node.js environment
-             (.from js/Buffer base64-str "base64")
-             ;; Browser environment (future)
-             (let [binary (js/atob base64-str)]
-               (js/Uint8Array. (map #(.charCodeAt % 0) binary))))))
+  (platform/base64-decode base64-str))
 
 ;; =============================================================================
 ;; MIME Type Detection

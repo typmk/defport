@@ -40,8 +40,7 @@
             [defport.sugar :as sugar :include-macros true]
             [defport.util.platform :as platform :include-macros true]
             [clojure.string :as str])
-  #?(:clj (:import [java.net URLDecoder URLEncoder]
-                   [java.nio.charset StandardCharsets])))
+  )
 
 ;; =============================================================================
 ;; LSP Protocol Version
@@ -919,25 +918,21 @@
   "Convert file path to file:// URI."
   [path]
   (when path
-    #?(:clj
-       (let [normalized (-> path
-                            (.replace "\\" "/")
-                            (.replaceFirst "^/" ""))]
-         (str "file:///" (URLEncoder/encode normalized StandardCharsets/UTF_8)
-              ;; URLEncoder encodes / as %2F, we need to restore them
-              (.replace "%2F" "/")))
-       :cljs
-       (str "file:///" path))))
+    (let [normalized (-> path
+                         (str/replace "\\" "/")
+                         (str/replace #"^/" ""))]
+      ;; URLEncoder encodes / as %2F, restore them after encoding
+      (str "file:///" (str/replace (platform/url-encode normalized)
+                                   "%2F" "/")))))
 
 (defn uri->file
   "Convert file:// URI to file path."
   [uri]
   (when uri
-    (-> uri
-        (clojure.string/replace #"^file:///" "")
-        (clojure.string/replace #"^file://" "")
-        #?(:clj (URLDecoder/decode StandardCharsets/UTF_8)
-           :cljs identity))))
+    (platform/url-decode
+     (-> uri
+         (clojure.string/replace #"^file:///" "")
+         (clojure.string/replace #"^file://" "")))))
 
 ;; =============================================================================
 ;; Section 7: Method Registry

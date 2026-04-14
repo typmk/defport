@@ -400,3 +400,43 @@
    Calls clojure.datafy/nav on both JVM and CLJS."
   [coll k v]
   (datafy/nav coll k v))
+
+;; ============================================================================
+;; URL encoding / decoding
+;; ============================================================================
+
+(defn url-encode
+  "Percent-encode a string for use in a URI."
+  [s]
+  #?(:clj  (java.net.URLEncoder/encode ^String s "UTF-8")
+     :cljs (js/encodeURIComponent s)))
+
+(defn url-decode
+  "Percent-decode a URI-encoded string."
+  [s]
+  #?(:clj  (java.net.URLDecoder/decode ^String s "UTF-8")
+     :cljs (js/decodeURIComponent s)))
+
+;; ============================================================================
+;; Base64 encoding / decoding
+;; ============================================================================
+
+(defn base64-encode
+  "Encode binary data (bytes on JVM, Uint8Array/Buffer on Node) to Base64.
+
+   Accepts a byte array on the JVM or anything js/Buffer.from can consume
+   on Node."
+  [data]
+  #?(:clj  (.encodeToString (java.util.Base64/getEncoder) ^bytes data)
+     :cljs (if (exists? js/Buffer)
+             (.toString (.from js/Buffer data) "base64")
+             (js/btoa (apply str (map char data))))))
+
+(defn base64-decode
+  "Decode a Base64 string to binary data (byte array on JVM, Buffer on Node)."
+  [s]
+  #?(:clj  (.decode (java.util.Base64/getDecoder) ^String s)
+     :cljs (if (exists? js/Buffer)
+             (.from js/Buffer s "base64")
+             (let [binary (js/atob s)]
+               (js/Uint8Array. (map #(.charCodeAt % 0) binary))))))
