@@ -1067,6 +1067,94 @@
 ;; =============================================================================
 ;; Section 9: LSP Adapter (ProtocolAdapter implementation)
 ;; =============================================================================
+;;
+;; State is a single atom holding an immutable map — same pattern MCP uses.
+;; All mutations go through swap! for consistent snapshots.
+
+(def ^:private empty-lsp-state
+  "The shape of a fresh LSP protocol state."
+  {:initialized          false
+   :shutting-down        false
+   :root-uri             nil
+   :active-operations    #{}     ;; LSP request IDs still in flight
+   :cancelled-operations #{}     ;; LSP request IDs that received $/cancelRequest
+   :progress-tokens      {}      ;; {token {:kind :work-done :started-at ms}}
+   :client-capabilities  nil})
+
+(defn create-protocol-state
+  "Create a fresh LSP protocol state atom.
+
+   Each LspAdapter owns one. Returns a single atom holding an immutable map.
+   All mutations go through swap! on this one atom — mirrors MCP's pattern."
+  []
+  (atom empty-lsp-state))
+
+(defn reset-protocol-state!
+  "Reset an LSP protocol state atom to its empty shape."
+  [state*]
+  (reset! state* empty-lsp-state))
+
+(defn adapter-state
+  "Get the protocol state atom from an LSP adapter. Useful for tests
+   and introspection."
+  [adapter]
+  (:state* adapter))
+
+;; ----- Cancellation ---------------------------------------------------------
+
+(defn register-operation
+  "Record an LSP request as in-flight so $/cancelRequest can target it.
+   Returns the request-id for chaining."
+  [state* request-id]
+  (when request-id
+    (swap! state* update :active-operations conj request-id))
+  request-id)
+
+(defn cancel-operation
+  "Mark an LSP request as cancelled. Handlers observing cancellation
+   via `cancelled?` can short-circuit their work."
+  [state* request-id]
+  (when request-id
+    (swap! state* update :cancelled-operations conj request-id)))
+
+(defn cancelled?
+  "Check whether an LSP request-id has been cancelled."
+  [state* request-id]
+  (contains? (:cancelled-operations @state*) request-id))
+
+(defn unregister-operation
+  "Drop a request-id from both active and cancelled sets once its
+   handler has returned."
+  [state* request-id]
+  (when request-id
+    (swap! state* (fn [s]
+                    (-> s
+                        (update :active-operations disj request-id)
+                        (update :cancelled-operations disj request-id))))))
+
+;; ----- Progress -------------------------------------------------------------
+
+(defn register-progress-token
+  "Track a work-done progress token the client handed us in a request."
+  [state* token]
+  (when token
+    (swap! state* assoc-in [:progress-tokens token]
+           {:kind :work-done
+            :started-at (platform/now-ms)}))
+  token)
+
+(defn unregister-progress-token
+  "Drop a progress token once its work has ended."
+  [state* token]
+  (when token
+    (swap! state* update :progress-tokens dissoc token)))
+
+(defn progress-token-active?
+  "Check whether we've registered a progress token for this request."
+  [state* token]
+  (contains? (:progress-tokens @state*) token))
+
+;; ----- Adapter --------------------------------------------------------------
 
 (defrecord LspAdapter [server-info
                        capabilities
@@ -1082,24 +1170,52 @@
     capabilities)
 
   (protocol-dispatch [this method params context]
-    (let [handler (get-handler method-registry method)
-          ctx (assoc context
-                     :adapter this
-                     :document-store document-store)]
-      (if handler
-        (platform/try-any
-          (let [result (handler params ctx)]
-            (tap> {:event :lsp/method-handled :method method})
-            result)
-          (catch-any e
-            (tap> {:event :lsp/method-error :method method
-                   :error (platform/error-message e)})
-            (error-response :internal-error
-                            (platform/error-message e))))
-        (do
-          (tap> {:event :lsp/method-not-found :method method})
-          (error-response :method-not-found
-                          (str "Method not implemented: " method)))))))
+    (cond
+      ;; Notifications: $/cancelRequest — flip a flag, return nothing.
+      (= method "$/cancelRequest")
+      (let [id (or (:id params) (get params "id"))]
+        (cancel-operation state* id)
+        (tap> {:event :lsp/cancel-request :id id})
+        nil)
+
+      ;; Notifications: $/progress — opaque passthrough to observers.
+      (= method "$/progress")
+      (do
+        (tap> {:event :lsp/progress :params params})
+        nil)
+
+      :else
+      (let [handler  (get-handler method-registry method)
+            request-id (or (:id context) (get params :id))
+            progress-token (or (:workDoneToken params)
+                               (get-in params [:partialResultToken]))
+            ctx (assoc context
+                       :adapter this
+                       :document-store document-store
+                       :state* state*
+                       :request-id request-id
+                       :progress-token progress-token)]
+        (if handler
+          (platform/try-any
+            (do
+              (register-operation state* request-id)
+              (when progress-token (register-progress-token state* progress-token))
+              (let [result (handler params ctx)]
+                (tap> {:event :lsp/method-handled :method method})
+                result))
+            (catch-any e
+              (tap> {:event :lsp/method-error :method method
+                     :error (platform/error-message e)})
+              (error-response :internal-error
+                              (platform/error-message e)))
+            (finally
+              (unregister-operation state* request-id)
+              (when progress-token
+                (unregister-progress-token state* progress-token))))
+          (do
+            (tap> {:event :lsp/method-not-found :method method})
+            (error-response :method-not-found
+                            (str "Method not implemented: " method))))))))
 
 (defn create-adapter
   "Create an LSP adapter.
@@ -1122,7 +1238,7 @@
   [{:keys [server-info capabilities methods]}]
   (let [registry (create-method-registry)
         doc-store (create-document-store)
-        state* (atom {:initialized false})]
+        state* (create-protocol-state)]
 
     ;; Register provided methods
     (doseq [[method handler] methods]
@@ -1162,11 +1278,14 @@
 (defn default-initialize-handler
   "Default initialize handler. Returns server capabilities."
   [adapter]
-  (fn [params context]
+  (fn [params _context]
     (let [{:keys [rootUri capabilities]} params]
       (tap> {:event :lsp/initialize :root-uri rootUri
              :client-capabilities capabilities})
-      (swap! (:state* adapter) assoc :initialized true :root-uri rootUri)
+      (swap! (:state* adapter) assoc
+             :initialized true
+             :root-uri rootUri
+             :client-capabilities capabilities)
       {:capabilities (:capabilities adapter)
        :serverInfo (:server-info adapter)})))
 

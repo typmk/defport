@@ -130,6 +130,74 @@
 ;; Legacy :lsp {:method ...} port still registers alongside sugar ports
 ;; ============================================================================
 
+;; ============================================================================
+;; State machinery: cancellation, progress, initialize
+;; ============================================================================
+
+(deftest test-cancel-request-flips-cancelled-flag
+  (testing "$/cancelRequest marks the targeted request-id as cancelled"
+    (let [reg (fresh-registry)
+          adapter (build-adapter reg)
+          state* (lsp/adapter-state adapter)]
+      (lsp/register-operation state* "req-7")
+      (is (not (lsp/cancelled? state* "req-7")))
+      (core/protocol-dispatch adapter "$/cancelRequest" {:id "req-7"} {})
+      (is (lsp/cancelled? state* "req-7"))
+      (is (nil? (core/protocol-dispatch adapter "$/cancelRequest"
+                                        {:id "req-7"} {}))
+          "$/cancelRequest is a notification, dispatch returns nil"))))
+
+(deftest test-progress-notification-is-passthrough
+  (testing "$/progress dispatches without error and returns nil"
+    (let [reg (fresh-registry)
+          adapter (build-adapter reg)
+          result (core/protocol-dispatch adapter "$/progress"
+                   {:token "t1" :value {:kind "begin"}} {})]
+      (is (nil? result)))))
+
+(deftest test-handler-context-carries-state-and-request-id
+  (testing "handler context includes :state* and :request-id"
+    (let [reg (fresh-registry)
+          captured (atom nil)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp hover
+          [uri :- :string line :- :int col :- :int ctx :- :context]
+          (reset! captured ctx)
+          {:ok true}))
+      (let [adapter (build-adapter reg)]
+        (core/protocol-dispatch adapter "textDocument/hover"
+          {:textDocument {:uri "file:///s.clj"} :position {:line 0 :character 0}}
+          {:id "req-42"})
+        (is (some? (:state* @captured)))
+        (is (= "req-42" (:request-id @captured)))))))
+
+(deftest test-operation-unregistered-after-handler-returns
+  (testing "active-operations set is clean after dispatch returns"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp hover
+          [uri :- :string line :- :int col :- :int]
+          {:contents {:kind "plaintext" :value "x"}}))
+      (let [adapter (build-adapter reg)
+            state* (lsp/adapter-state adapter)]
+        (core/protocol-dispatch adapter "textDocument/hover"
+          {:textDocument {:uri "file:///s.clj"} :position {:line 0 :character 0}}
+          {:id "req-99"})
+        (is (empty? (:active-operations @state*)))))))
+
+(deftest test-initialize-stores-client-capabilities
+  (testing "default-initialize-handler stores root + capabilities in state"
+    (let [reg (fresh-registry)
+          adapter (build-adapter reg)
+          state* (lsp/adapter-state adapter)]
+      (lsp/register-lifecycle-handlers! adapter)
+      (core/protocol-dispatch adapter "initialize"
+        {:rootUri "file:///proj" :capabilities {:textDocument {:hover true}}}
+        {})
+      (is (true? (:initialized @state*)))
+      (is (= "file:///proj" (:root-uri @state*)))
+      (is (= {:textDocument {:hover true}} (:client-capabilities @state*))))))
+
 (deftest test-legacy-lsp-metadata-still-routes
   (testing "a port with nested :lsp {:method ...} metadata routes through
             the legacy create-port-handler wrapper"
