@@ -88,22 +88,29 @@
   pending)
 
 (defn await
-  "Block until the pending request resolves and return [result error].
-   JVM-only — on CLJS this throws because Node cannot block.
+  "Resolve a Pending.
+
+   On JVM: blocks until the pending resolves, returns [result error].
+   On CLJS: returns a js/Promise that resolves to [result error]
+   or rejects with the error map. Node cannot block the event loop
+   — consumers use `.then` / `async/await` at the call site.
 
    For the common case use the typed convenience helpers
-   (hover-at, definition-at, ...) which return [result error]
-   directly on JVM and a Pending on CLJS so consumers pick their own
-   async strategy."
+   (hover-at, definition-at, ...) which return a Pending; wrap that
+   in `await` or `then` depending on your async strategy."
   [^Pending pending]
   #?(:clj
      (let [done   (promise)]
        (then pending (fn [r e] (deliver done [r e])))
        @done)
      :cljs
-     (throw (ex-info
-              "lsp.client/await is JVM-only — Node cannot block the event loop. Use `then` with a callback, or wrap the Pending in your own async lib."
-              {:platform :cljs}))))
+     (js/Promise.
+       (fn [resolve reject]
+         (then pending
+               (fn [r e]
+                 (if e
+                   (reject (clj->js e))
+                   (resolve #js [(clj->js r) nil]))))))))
 
 (defn- resolve-pending!
   "Internal: mark a pending as done with a result or error and fire

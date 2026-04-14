@@ -64,16 +64,24 @@
   pending)
 
 (defn await
-  "Block until the pending resolves and return [body error]. JVM-only."
+  "Resolve a Pending.
+
+   On JVM: blocks until resolved, returns [body error].
+   On CLJS: returns a js/Promise that resolves to [body error]
+   or rejects with the error map."
   [^Pending pending]
   #?(:clj
      (let [done (promise)]
        (then pending (fn [b e] (deliver done [b e])))
        @done)
      :cljs
-     (throw (ex-info
-              "dap.client/await is JVM-only — Node cannot block. Use `then` with a callback."
-              {:platform :cljs}))))
+     (js/Promise.
+       (fn [resolve reject]
+         (then pending
+               (fn [b e]
+                 (if e
+                   (reject (clj->js e))
+                   (resolve #js [(clj->js b) nil]))))))))
 
 (defn- resolve-pending! [^Pending pending body error]
   (let [old (swap-vals! (:state* pending)

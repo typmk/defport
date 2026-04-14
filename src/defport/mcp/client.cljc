@@ -68,16 +68,25 @@
   pending)
 
 (defn await
-  "Block until the pending resolves, returning [result error]. JVM-only."
+  "Resolve a Pending.
+
+   On JVM: blocks until resolved, returns [result error].
+   On CLJS: returns a js/Promise that resolves to [result error]
+   or rejects with the error map. Node cannot block the event
+   loop — consumers use `.then` / `async/await` at the call site."
   [^Pending pending]
   #?(:clj
      (let [done (promise)]
        (then pending (fn [r e] (deliver done [r e])))
        @done)
      :cljs
-     (throw (ex-info
-              "mcp.client/await is JVM-only — Node cannot block. Use `then`."
-              {:platform :cljs}))))
+     (js/Promise.
+       (fn [resolve reject]
+         (then pending
+               (fn [r e]
+                 (if e
+                   (reject (clj->js e))
+                   (resolve #js [(clj->js r) nil]))))))))
 
 (defn- resolve-pending! [^Pending pending result error]
   (let [old (swap-vals! (:state* pending)

@@ -736,10 +736,19 @@
         refactoring-enabled? (get context :refactoring-enabled? false)
         tool-filter (or (:tool-filter context) identity)
 
-        ;; Filter for tool ports (exclude prompts and resources)
+        ;; A port belongs to this MCP adapter's tool surface if it is
+        ;; - positively marked :mcp/tool (from defmacro deftool), OR
+        ;; - a legacy port with no MCP prompt/resource metadata AND
+        ;;   no other protocol's metadata (so LSP/DAP ports sharing
+        ;;   the registry in multi-adapter setups don't leak through)
         tool-ports (filter (fn [port-def]
-                            (not (or (get-in port-def [:metadata :prompt])
-                                    (get-in port-def [:metadata :resource]))))
+                             (let [m (:metadata port-def)]
+                               (and (not (:prompt m))
+                                    (not (:resource m))
+                                    (not (:mcp/prompt m))
+                                    (not (:mcp/resource m))
+                                    (not (:lsp/method m))
+                                    (not (:dap/command m)))))
                           all-ports)
 
         ;; Apply dangerous tool filtering (hybrid approach)
