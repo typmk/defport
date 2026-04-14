@@ -1010,29 +1010,49 @@
 ;;     [expression :- :string frameId :- :int]
 ;;     {:result (str "=> " expression) :variablesReference 0})
 
+(defn- dap-sugar-shape-form
+  "Build a form that pulls flat params out of raw DAP arguments for a
+   given command-name keyword. Reads :sugar from defport.dap.spec.
+   :raw is a passthrough; the other shapes re-key camelCase wire fields
+   to kebab-case Clojure names so deflsp/defcommand bindings work."
+  [cmd-key raw-args-form]
+  (let [shape (or (:sugar (spec/method-for cmd-key)) :raw)]
+    (case shape
+      :thread  `{:thread-id (:threadId ~raw-args-form)}
+      :frame   `{:frame-id  (:frameId ~raw-args-form)}
+      :var-ref `{:variables-reference (:variablesReference ~raw-args-form)}
+      :source  `{:source (:source ~raw-args-form)
+                 :source-reference (:sourceReference ~raw-args-form)}
+      :raw     raw-args-form)))
+
 (defmacro defcommand
   "Define a DAP command handler.
 
   The handler-name is a symbol whose keyword form is looked up in
-  defport.dap.spec/methods. The spec entry tells the macro which
-  wire-command string to attach (camelCase per DAP spec) and which
-  capability flag the port implies. Custom commands not in the spec
-  registry fall back to the handler-name's literal kebab-case form.
+  defport.dap.spec/methods. The spec entry tells the macro:
+
+  - which wire-command string to attach (camelCase per DAP spec)
+  - which sugar shape to extract from the raw DAP arguments map
+    (:thread → re-keys :threadId → :thread-id, etc.)
+  - which capability flag the port implies
+
+  Custom commands not in the spec registry fall back to the literal
+  handler-name and :raw passthrough.
 
   Usage:
     (defcommand step-in
       \"Step into a call.\"
-      [thread-id :- :int]
+      [thread-id :- :int]                 ; sugar :thread re-keys :threadId
       {:allThreadsContinued false})       ; emits :dap/command \"stepIn\"
 
     (defcommand evaluate
       \"Evaluate an expression.\"
-      [expression :- :string frameId :- :int]
-      {:result (str \"=> \" expression)})  ; emits :dap/command \"evaluate\"
+      [expression :- :string frameId :- :int]   ; :raw — params used directly
+      {:result (str \"=> \" expression)})        ; emits :dap/command \"evaluate\"
 
     (defcommand my-custom-cmd                 ; not in spec
-      [arg :- :string]                        ; emits :dap/command \"my-custom-cmd\"
-      {:ok true})
+      [arg :- :string]                        ; :raw fallback
+      {:ok true})                             ; emits :dap/command \"my-custom-cmd\"
 
   The generated port carries {:dap/command \"...\"} metadata; the
   DAP adapter routes commands to it at dispatch time."
@@ -1040,18 +1060,39 @@
   (let [cmd-key      (keyword (clojure.core/name handler-name))
         spec-cmd     (spec/wire-command cmd-key)
         command-name (or spec-cmd (clojure.core/name handler-name))
-        [doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        [doc args]   (if (string? (first args)) [(first args) (rest args)] [nil args])
         [options args] (if (and (map? (first args))
                                 (not (some #(and (keyword? %) (namespace %))
                                            (keys (first args)))))
                          [(first args) (rest args)] [{} args])
-        [params body] [(first args) (rest args)]]
-    `(sugar/define-port ~handler-name
-       ~@(when doc [doc])
-       ~options
-       {:dap/command ~command-name}
-       ~params
-       ~@body)))
+        [params body] [(first args) (rest args)]
+        parsed   (sugar/parse-params params)
+        schema   (sugar/params->json-schema parsed)
+        pnames   (mapv :name (:params parsed))
+        ctx-name (:context-name parsed)
+        raw-sym       (gensym "raw-args__")
+        extracted-sym (gensym "extracted__")
+        ctx-sym       (gensym "context__")]
+    `(let [handler# (fn [~ctx-sym]
+                      (let [~raw-sym (:params ~ctx-sym)
+                            ~extracted-sym ~(dap-sugar-shape-form cmd-key raw-sym)
+                            ~@(when ctx-name [ctx-name ctx-sym])
+                            ~@(mapcat (fn [n]
+                                        [n `(or (get ~extracted-sym
+                                                     ~(keyword (clojure.core/name n)))
+                                                ;; fall back to raw args for :raw shape
+                                                (get ~raw-sym
+                                                     ~(keyword (clojure.core/name n))))])
+                                      pnames)]
+                        ~@body))
+           port# {:id ~(keyword (clojure.core/name handler-name))
+                  :name ~(clojure.core/name handler-name)
+                  :description ~(or doc "")
+                  :input-schema ~schema
+                  :handler handler#
+                  :metadata (merge ~options {:dap/command ~command-name})}]
+       (core/register-port! sugar/*registry* port#)
+       port#)))
 
 (defmethod sugar/create-adapter :dap
   [_protocol opts]
