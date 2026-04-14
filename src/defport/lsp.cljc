@@ -1430,15 +1430,59 @@
     ;; Default: return as-is
     result))
 
-(defn- create-port-handler
-  "Create LSP handler from port definition."
+(defn- port-def-method
+  "Return the LSP method string a port def is meant for, or nil.
+   Supports two metadata shapes:
+
+     Legacy:   {:metadata {:lsp {:method \"textDocument/...\" :transform ...}}}
+     Sugar:    {:metadata {:lsp/method \"textDocument/...\"}}"
   [port-def]
-  (let [handler (:handler port-def)
-        transform (get-in port-def [:metadata :lsp :transform])]
+  (or (get-in port-def [:metadata :lsp/method])
+      (get-in port-def [:metadata :lsp :method])))
+
+(defn- port-def-sugar?
+  "Sugar-style ports carry :lsp/method at the top of :metadata and their
+   handler already knows how to read raw LSP params — no legacy
+   transformation layer should wrap them."
+  [port-def]
+  (some? (get-in port-def [:metadata :lsp/method])))
+
+(defn find-ports-for-lsp
+  "Find all ports in a registry whose metadata targets an LSP method.
+
+   Accepts an optional PortRegistry instance. Defaults to the shared
+   sugar registry (`defport.sugar/*registry*`). Returns a map of
+   {lsp-method {:descriptor port-def :port port}}."
+  ([] (find-ports-for-lsp (deref #'sugar/*registry*)))
+  ([port-registry]
+   (->> (core/list-ports port-registry)
+        (filter port-def-method)
+        (map (fn [p]
+               [(port-def-method p)
+                {:descriptor p
+                 :port (core/get-port port-registry (:id p))}]))
+        (into {}))))
+
+(defn- sugar-port-handler
+  "Wrap a sugar-style Port so its raw LSP params are passed through
+   unmodified; `deflsp` already extracts position/range/etc."
+  [port]
+  (fn [params context]
+    (platform/try-any
+      (core/port-execute port (assoc context :params params))
+      (catch-any e
+        (error-response :internal-error
+                        (platform/error-message e))))))
+
+(defn- legacy-port-handler
+  "Legacy wrapper that translates LSP params to defnet-style
+   {:file :line :column :query :function-name} before invoking the
+   Port, then runs the declared :transform on the result."
+  [descriptor port]
+  (let [transform (get-in descriptor [:metadata :lsp :transform])]
     (fn [params context]
       (platform/try-any
-        (let [;; Convert LSP params to port params
-              port-params (cond-> {}
+        (let [port-params (cond-> {}
                             (:textDocument params)
                             (assoc :file (some-> (:textDocument params)
                                                  :uri
@@ -1446,51 +1490,44 @@
                             (:position params)
                             (-> (assoc :line (:line (:position params)))
                                 (assoc :column (:character (:position params))))
-                            ;; Pass through function-name if provided
                             (:function-name params)
                             (assoc :function-name (:function-name params))
-                            ;; Pass through query if provided
                             (:query params)
                             (assoc :query (:query params)))
-              ;; Execute port handler
-              result (handler (assoc context :params port-params))
-              ;; Extract result data
+              result (core/port-execute port (assoc context :params port-params))
               data (or (:result result) result)]
           (transform-result transform data))
         (catch-any e
           (error-response :internal-error
                           (platform/error-message e)))))))
 
-(defn find-ports-for-lsp
-  "Find all registered ports with :lsp metadata.
-
-   Returns map of {lsp-method port-def}"
-  []
-  (->> (core/list-registered-port-defs)
-       (filter #(get-in % [:metadata :lsp :method]))
-       (map (fn [p] [(get-in p [:metadata :lsp :method]) p]))
-       (into {})))
-
 (defn register-ports!
-  "Register all ports with :lsp metadata as LSP method handlers.
+  "Register every port in a registry whose metadata targets an LSP
+   method as a handler on this adapter.
 
-   Automatically finds ports in defport.core registry that have
-   :metadata {:lsp {:method \"textDocument/...\"}} and registers
-   them as handlers on the adapter.
+   Two metadata shapes are supported:
 
-   Example:
-     (def adapter (create-adapter {...}))
-     (register-ports! adapter)
+   - Sugar (`deflsp`): `{:metadata {:lsp/method \"textDocument/...\"}}`
+     → the port's handler is called with raw LSP params intact.
+   - Legacy: `{:metadata {:lsp {:method ... :transform ...}}}`
+     → the legacy wrapper runs, translating LSP params to defnet-style
+     params and applying the transform.
 
-   After this, LSP requests like textDocument/references will
-   be routed to the matching port handler."
-  [adapter]
-  (doseq [[method port-def] (find-ports-for-lsp)]
-    (tap> {:event :lsp/registering-port
-           :method method
-           :port-id (:id port-def)})
-    (register-method! adapter method (create-port-handler port-def)))
-  adapter)
+   Defaults to registering from `defport.sugar/*registry*`. Pass an
+   explicit PortRegistry for isolated wiring (tests, multi-instance)."
+  ([adapter]
+   (register-ports! adapter (deref #'sugar/*registry*)))
+  ([adapter port-registry]
+   (doseq [[method {:keys [descriptor port]}] (find-ports-for-lsp port-registry)]
+     (tap> {:event :lsp/registering-port
+            :method method
+            :port-id (:id descriptor)
+            :sugar? (port-def-sugar? descriptor)})
+     (let [wrapped (if (port-def-sugar? descriptor)
+                     (sugar-port-handler port)
+                     (legacy-port-handler descriptor port))]
+       (register-method! adapter method wrapped)))
+   adapter))
 
 ;; ============================================================================
 ;; Progressive-disclosure DSL — deflsp / defhandler / run!
@@ -1670,9 +1707,10 @@
 
 (defmethod sugar/create-adapter :lsp
   [_protocol opts]
-  (let [adapter (create-adapter opts)]
+  (let [adapter (create-adapter opts)
+        registry (or (:registry opts) (deref #'sugar/*registry*))]
     ;; Auto-register any ports that carry :lsp/method metadata
-    (register-ports! adapter)
+    (register-ports! adapter registry)
     adapter))
 
 ;; ============================================================================
