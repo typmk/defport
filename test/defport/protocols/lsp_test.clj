@@ -198,6 +198,46 @@
       (is (= "file:///proj" (:root-uri @state*)))
       (is (= {:textDocument {:hover true}} (:client-capabilities @state*))))))
 
+;; ============================================================================
+;; Auto-derived capabilities
+;; ============================================================================
+
+(deftest test-capabilities-auto-derive-from-registry
+  (testing "deflsp hover + references implies hoverProvider + referencesProvider"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp hover [uri :- :string line :- :int col :- :int]
+          {:contents {:kind "plaintext" :value "x"}})
+        (lsp/deflsp references [uri :- :string line :- :int col :- :int]
+          []))
+      (let [caps (lsp/capabilities-from-registry reg)]
+        (is (contains? caps :hoverProvider))
+        (is (contains? caps :referencesProvider))
+        (is (not (contains? caps :renameProvider)))))))
+
+(deftest test-create-adapter-reports-derived-capabilities
+  (testing "sugar/create-adapter :lsp merges derived caps with user caps"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp document-symbol [uri :- :string] []))
+      (let [adapter (build-adapter reg)
+            caps (core/protocol-capabilities adapter reg)]
+        (is (contains? caps :documentSymbolProvider))))))
+
+(deftest test-initialize-returns-derived-capabilities
+  (testing "initialize response reflects derived providers"
+    (let [reg (fresh-registry)]
+      (binding [sugar/*registry* reg]
+        (lsp/deflsp rename
+          [uri :- :string line :- :int col :- :int new-name :- :string]
+          {:changes {}}))
+      (let [adapter (build-adapter reg)
+            _ (lsp/register-lifecycle-handlers! adapter)
+            result (core/protocol-dispatch adapter "initialize"
+                     {:rootUri "file:///proj" :capabilities {}}
+                     {:port-registry reg})]
+        (is (contains? (:capabilities result) :renameProvider))))))
+
 (deftest test-legacy-lsp-metadata-still-routes
   (testing "a port with nested :lsp {:method ...} metadata routes through
             the legacy create-port-handler wrapper"

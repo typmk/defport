@@ -1071,6 +1071,8 @@
 ;; State is a single atom holding an immutable map — same pattern MCP uses.
 ;; All mutations go through swap! for consistent snapshots.
 
+(declare capabilities-from-registry)
+
 (def ^:private empty-lsp-state
   "The shape of a fresh LSP protocol state."
   {:initialized          false
@@ -1166,8 +1168,10 @@
 
   (protocol-version [_] protocol-version)
 
-  (protocol-capabilities [_ _port-registry]
-    capabilities)
+  (protocol-capabilities [_ port-registry]
+    (if port-registry
+      (merge (capabilities-from-registry port-registry) capabilities)
+      capabilities))
 
   (protocol-dispatch [this method params context]
     (cond
@@ -1276,9 +1280,10 @@
 ;; Applications can use these or provide their own.
 
 (defn default-initialize-handler
-  "Default initialize handler. Returns server capabilities."
+  "Default initialize handler. Returns server capabilities, including
+   any providers auto-derived from ports in the context's port-registry."
   [adapter]
-  (fn [params _context]
+  (fn [params context]
     (let [{:keys [rootUri capabilities]} params]
       (tap> {:event :lsp/initialize :root-uri rootUri
              :client-capabilities capabilities})
@@ -1286,7 +1291,8 @@
              :initialized true
              :root-uri rootUri
              :client-capabilities capabilities)
-      {:capabilities (:capabilities adapter)
+      {:capabilities (core/protocol-capabilities adapter
+                                                 (:port-registry context))
        :serverInfo (:server-info adapter)})))
 
 (defn default-initialized-handler
@@ -1548,6 +1554,49 @@
 
     ;; Default: return as-is
     result))
+
+(def ^:private method->capability-key
+  "LSP method string → ServerCapabilities key to enable when a port
+   claims that method. Covers the core methods register-ports! can
+   route — extend as more defaults land."
+  {"textDocument/hover"              :hoverProvider
+   "textDocument/definition"         :definitionProvider
+   "textDocument/declaration"        :declarationProvider
+   "textDocument/typeDefinition"     :typeDefinitionProvider
+   "textDocument/implementation"     :implementationProvider
+   "textDocument/references"         :referencesProvider
+   "textDocument/documentSymbol"     :documentSymbolProvider
+   "textDocument/documentHighlight"  :documentHighlightProvider
+   "textDocument/rename"             :renameProvider
+   "textDocument/prepareRename"      :renameProvider
+   "textDocument/codeAction"         :codeActionProvider
+   "textDocument/codeLens"           :codeLensProvider
+   "textDocument/formatting"         :documentFormattingProvider
+   "textDocument/rangeFormatting"    :documentRangeFormattingProvider
+   "textDocument/foldingRange"       :foldingRangeProvider
+   "textDocument/selectionRange"     :selectionRangeProvider
+   "textDocument/signatureHelp"      :signatureHelpProvider
+   "textDocument/completion"         :completionProvider
+   "textDocument/inlayHint"          :inlayHintProvider
+   "textDocument/semanticTokens/full" :semanticTokensProvider
+   "workspace/symbol"                :workspaceSymbolProvider})
+
+(defn capabilities-from-registry
+  "Walk a PortRegistry and return a ServerCapabilities fragment that
+   enables each provider for which at least one port has claimed the
+   corresponding LSP method via :lsp/method metadata.
+
+   Static user-supplied capabilities take precedence when merged —
+   this fragment only enables providers the user hasn't already
+   configured."
+  [port-registry]
+  (reduce (fn [caps port-def]
+            (if-let [cap-key (get method->capability-key
+                                  (get-in port-def [:metadata :lsp/method]))]
+              (update caps cap-key (fn [existing] (or existing {})))
+              caps))
+          {}
+          (core/list-ports port-registry)))
 
 (defn- port-def-method
   "Return the LSP method string a port def is meant for, or nil.
@@ -1826,8 +1875,11 @@
 
 (defmethod sugar/create-adapter :lsp
   [_protocol opts]
-  (let [adapter (create-adapter opts)
-        registry (or (:registry opts) (deref #'sugar/*registry*))]
+  (let [registry (or (:registry opts) (deref #'sugar/*registry*))
+        ;; Merge auto-computed capabilities under user-supplied ones
+        derived (capabilities-from-registry registry)
+        opts'   (update opts :capabilities #(merge derived %))
+        adapter (create-adapter opts')]
     ;; Auto-register any ports that carry :lsp/method metadata
     (register-ports! adapter registry)
     adapter))
