@@ -90,7 +90,7 @@
     :handler-sym 'defport.mcp/handle-tools-call
     :doc         "Invoke a tool with arguments."}
 
-   :tools/call/cancel
+   :tools/call-cancel
    {:method      "tools/call/cancel"
     :kind        :request
     :direction   :client->server
@@ -98,7 +98,7 @@
     :handler-sym 'defport.mcp/handle-tools-call-cancel
     :doc         "Cancel an in-flight tool call by id."}
 
-   :notifications/tools/list_changed
+   :notifications/tools-list-changed
    {:method      "notifications/tools/list_changed"
     :kind        :notification
     :direction   :server->client
@@ -125,7 +125,7 @@
     :handler-sym 'defport.mcp/handle-prompts-get
     :doc         "Fetch a named prompt with optional arguments."}
 
-   :notifications/prompts/list_changed
+   :notifications/prompts-list-changed
    {:method      "notifications/prompts/list_changed"
     :kind        :notification
     :direction   :server->client
@@ -168,7 +168,7 @@
     :handler-sym 'defport.mcp/handle-resources-unsubscribe
     :doc         "Unsubscribe from a resource URI."}
 
-   :resources/templates/list
+   :resources/templates-list
    {:method      "resources/templates/list"
     :kind        :request
     :direction   :client->server
@@ -176,7 +176,7 @@
     :handler-sym nil   ;; MCP Inspector extension — adapter ships an inline no-op
     :doc         "List resource templates. MCP Inspector extension."}
 
-   :notifications/resources/list_changed
+   :notifications/resources-list-changed
    {:method      "notifications/resources/list_changed"
     :kind        :notification
     :direction   :server->client
@@ -184,7 +184,7 @@
     :handler-sym nil
     :doc         "Server tells client the resource list has changed."}
 
-   :notifications/resources/updated
+   :notifications/resources-updated
    {:method      "notifications/resources/updated"
     :kind        :notification
     :direction   :server->client
@@ -203,7 +203,7 @@
     :handler-sym 'defport.mcp/handle-roots-list
     :doc         "Server asks client to list its filesystem roots."}
 
-   :notifications/roots/list_changed
+   :notifications/roots-list-changed
    {:method      "notifications/roots/list_changed"
     :kind        :notification
     :direction   :client->server
@@ -238,7 +238,7 @@
     :handler-sym 'defport.mcp/handle-elicitation-cancel
     :doc         "Cancel a pending elicitation."}
 
-   :notifications/elicitation/complete
+   :notifications/elicitation-complete
    {:method      "notifications/elicitation/complete"
     :kind        :notification
     :direction   :client->server

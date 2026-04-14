@@ -1384,33 +1384,31 @@
          ;; Per-adapter protocol state — no global sharing
          state* (or (:state* opts) (create-protocol-state))
 
-         ;; Default method handlers derived from defport.mcp.spec. For
-         ;; each spec entry with a :handler-sym, resolve the symbol to
-         ;; a var and install it under the wire method string. Three
-         ;; methods need closure wrapping because their handlers take
-         ;; extra implicit arguments (server-info / state*) that the
-         ;; dispatcher doesn't know about; those overrides take
-         ;; precedence over the spec-derived entries.
-         spec-derived-handlers
-         (reduce (fn [acc [wire-method handler-sym]]
-                   (if-let [v (resolve handler-sym)]
-                     (assoc acc wire-method @v)
-                     acc))
-                 {}
-                 (spec/default-handler-syms))
-
-         ;; Overrides for handlers that need closure over server-info
-         ;; or state* — these three can't be flat (2-arity params+ctx)
-         ;; fns without an API change to their handler fn.
-         closure-wrapped-handlers
-         {"initialize" (fn [p ctx] (handle-initialize p ctx server-info))
-          "ping"       (fn [p ctx] (handle-ping p ctx server-info))
-          "roots/list" (fn [p ctx] (handle-roots-list state* p ctx))
-          ;; Inline MCP Inspector extension: no spec entry carries the
-          ;; lambda, so supply it here.
-          "resources/templates/list" (fn [_ _] {:resourceTemplates []})}
-
-         default-handlers (merge spec-derived-handlers closure-wrapped-handlers)
+         ;; Default method handlers. Wire method strings come from
+         ;; defport.mcp.spec so there's a single source of truth for
+         ;; what methods defport routes; handler fns are referenced
+         ;; directly (no runtime symbol resolution — CLJS `resolve` is
+         ;; a compile-time macro). Three handlers need closure
+         ;; wrapping for implicit state*/server-info arguments.
+         default-handlers
+         {(spec/wire-method :initialize)          (fn [p ctx] (handle-initialize p ctx server-info))
+          (spec/wire-method :ping)                (fn [p ctx] (handle-ping p ctx server-info))
+          (spec/wire-method :tools/list)          handle-tools-list
+          (spec/wire-method :tools/call)          handle-tools-call
+          (spec/wire-method :tools/call-cancel)   handle-tools-call-cancel
+          (spec/wire-method :prompts/list)        handle-prompts-list
+          (spec/wire-method :prompts/get)         handle-prompts-get
+          (spec/wire-method :resources/list)      handle-resources-list
+          (spec/wire-method :resources/read)      handle-resources-read
+          (spec/wire-method :resources/subscribe) handle-resources-subscribe
+          (spec/wire-method :resources/unsubscribe) handle-resources-unsubscribe
+          (spec/wire-method :resources/templates-list) (fn [_ _] {:resourceTemplates []})
+          (spec/wire-method :roots/list)          (fn [p ctx] (handle-roots-list state* p ctx))
+          (spec/wire-method :elicitation/create)  handle-elicitation-create
+          (spec/wire-method :elicitation/submit)  handle-elicitation-submit
+          (spec/wire-method :elicitation/cancel)  handle-elicitation-cancel
+          (spec/wire-method :completion/complete) handle-completion-complete
+          (spec/wire-method :logging/setLevel)    handle-logging-set-level}
 
          ;; Merge custom handlers last so they win
          method-handlers (merge default-handlers custom-handlers)]
