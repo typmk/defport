@@ -26,12 +26,17 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
+            [cheshire.core :as json]
             [defport.mcp.client :as mcp]
             [defport.mcp.client.transports.subprocess :as mcp-sub]
             [defport.lsp.client :as lsp]
             [defport.lsp.client.transports.subprocess :as lsp-sub]
             [defport.dap.client :as dap]
-            [defport.dap.client.transports.subprocess :as dap-sub]))
+            [defport.dap.client.transports.subprocess :as dap-sub]
+            [defport.cdp.client :as cdp]
+            [defport.cdp.client.transports.websocket :as cdp-ws]
+            [defport.ros2.client :as ros2]
+            [defport.ros2.client.transports.websocket :as ros2-ws]))
 
 ;; ============================================================================
 ;; Helpers
@@ -215,6 +220,147 @@
 
 (defn- script-path [name]
   (str "test/defport/integration/resources/" name))
+
+;; ============================================================================
+;; CDP: defport client vs real Chromium
+;; ============================================================================
+
+(defn- start-headless-chromium!
+  "Spawn chromium with a remote debugging port. Returns the Process
+   handle so the test can terminate it in a finally."
+  [port]
+  (let [pb (ProcessBuilder. ["chromium"
+                             "--headless=new"
+                             "--disable-gpu"
+                             "--no-sandbox"
+                             (str "--remote-debugging-port=" port)
+                             "about:blank"])
+        proc (.start pb)]
+    ;; Wait until the DevTools endpoint accepts connections.
+    (loop [tries 30]
+      (if (zero? tries)
+        (throw (ex-info "Chromium DevTools endpoint didn't come up in time" {}))
+        (let [ok? (try (slurp (str "http://localhost:" port "/json/version")) true
+                       (catch Exception _ false))]
+          (if ok?
+            proc
+            (do (Thread/sleep 200) (recur (dec tries)))))))))
+
+(deftest test-cdp-real-chromium
+  (testing "defport CDP client can drive real Chromium"
+    (if-not (available? "chromium")
+      (skip "chromium not installed")
+      (let [port 9222
+            proc (start-headless-chromium! port)]
+        (try
+          (let [targets (json/parse-string
+                          (slurp (str "http://localhost:" port "/json")) true)
+                page    (first (filter #(= "page" (:type %)) targets))
+                ws-url  (:webSocketDebuggerUrl page)
+                client  (-> (cdp-ws/transport ws-url)
+                            (cdp/create-client)
+                            (cdp/connect! {}))]
+            (try
+              ;; Browser.getVersion — proves the WS transport is wired
+              (let [[body err] (cdp/await (cdp/browser-get-version client))]
+                (is (nil? err) (str "Browser.getVersion error: " err))
+                (is (string? (:product body)))
+                (is (re-find #"Chrome/" (:product body)))
+                (is (string? (:protocolVersion body))))
+
+              ;; Runtime.evaluate — proves JSON-RPC envelope is correct
+              (let [[body err] (cdp/await (cdp/runtime-evaluate client "1 + 2 + 3"))]
+                (is (nil? err))
+                (is (= 6 (get-in body [:result :value]))))
+
+              ;; Page.navigate + a deferred DOM read (via a direct
+              ;; JS expression rather than waiting for loadEventFired,
+              ;; which would need an event handler)
+              (let [[_ err] (cdp/await
+                              (cdp/page-navigate client
+                                "data:text/html,<h1 id='x'>hello defport</h1>"))]
+                (is (nil? err)))
+
+              (finally
+                (cdp/disconnect! client))))
+          (finally
+            (.destroy proc)
+            (try (.waitFor proc) (catch Exception _))))))))
+
+;; ============================================================================
+;; rosbridge: defport.ros2.client vs a minimal fake rosbridge_server
+;; ============================================================================
+;;
+;; No ROS 2 installation on this dev box. Instead we spawn a
+;; Python WebSocket server that implements just enough of the
+;; rosbridge v2.0 protocol to exercise defport's client round-trip:
+;; subscribe, call_service, send_action_goal. The Python server
+;; uses the `websockets` package — ubiquitous on modern Debian/
+;; Ubuntu/Kali.
+
+(defn- python-websockets-available? []
+  (and (runnable? "python3")
+       (zero? (:exit (shell/sh "python3" "-c" "import websockets")))))
+
+(defn- start-fake-rosbridge!
+  "Start the Python fake rosbridge server in a subprocess. Returns
+   the Process handle."
+  [port]
+  (let [pb (ProcessBuilder.
+             ["python3"
+              "test/defport/integration/resources/fake_rosbridge_server.py"
+              (str port)])
+        _ (.redirectErrorStream pb false)
+        proc (.start pb)]
+    ;; Wait until it's listening — the server writes a startup line
+    ;; to stderr.
+    (Thread/sleep 600)
+    proc))
+
+(deftest test-ros2-fake-rosbridge-round-trip
+  (testing "defport.ros2.client round-trips against a fake rosbridge_server"
+    (if-not (python-websockets-available?)
+      (skip "python3 `websockets` package not installed")
+      (let [port 9099
+            proc (start-fake-rosbridge! port)]
+        (try
+          (let [client (-> (ros2-ws/transport (str "ws://127.0.0.1:" port))
+                           (ros2/create-client)
+                           (ros2/connect! {}))
+                topic-hit (promise)]
+            (try
+              ;; subscribe + on-topic should fire when the fake
+              ;; server echoes a publish back
+              (ros2/on-topic client "/scan"
+                             (fn [msg] (deliver topic-hit msg)))
+              (ros2/subscribe! client "/scan" "sensor_msgs/msg/LaserScan")
+              (let [msg (deref topic-hit 2000 ::timeout)]
+                (is (not= ::timeout msg))
+                (is (= "hello from fake rosbridge" (:data msg))))
+
+              ;; call_service — correlation by id
+              (let [[body err] (ros2/await
+                                 (ros2/call-service client
+                                                    "/add_two_ints"
+                                                    {:a 1 :b 2}))]
+                (is (nil? err))
+                (is (= 42 (:sum body))))
+
+              ;; send_action_goal — correlation by id,
+              ;; intermediate feedback taps through
+              (let [[body err] (ros2/await
+                                 (ros2/send-action-goal client
+                                                        "/fibonacci"
+                                                        {:order 5}))]
+                (is (nil? err))
+                (is (vector? (:sequence body)))
+                (is (= [0 1 1 2 3] (:sequence body))))
+
+              (finally
+                (ros2/disconnect! client))))
+          (finally
+            (.destroy proc)
+            (try (.waitFor proc) (catch Exception _))))))))
 
 (deftest test-python-mcp-client-vs-defport-server
   (testing "external Python MCP client spawns defport's MCP server and round-trips"
