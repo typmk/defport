@@ -29,7 +29,9 @@
             [defport.mcp.client :as mcp]
             [defport.mcp.client.transports.subprocess :as mcp-sub]
             [defport.lsp.client :as lsp]
-            [defport.lsp.client.transports.subprocess :as lsp-sub]))
+            [defport.lsp.client.transports.subprocess :as lsp-sub]
+            [defport.dap.client :as dap]
+            [defport.dap.client.transports.subprocess :as dap-sub]))
 
 ;; ============================================================================
 ;; Helpers
@@ -191,9 +193,89 @@
 ;; setup phase and spawn it here. Leaving a placeholder test that
 ;; deliberately skips so the suite documents the gap rather than hiding it.
 
-(deftest test-dap-real-debug-adapter
-  (testing "defport DAP client ↔ real debug adapter (debugpy)"
-    (if-not (and (available? "python3")
-                 (zero? (:exit (shell/sh "python3" "-c" "import debugpy"))))
-      (skip "debugpy not installed — pip install debugpy to enable this test")
-      (is true "debugpy available — would run real DAP handshake here"))))
+(defn- debugpy-available? []
+  (and (runnable? "python3")
+       (zero? (:exit (shell/sh "python3" "-c" "import debugpy")))))
+
+;; ============================================================================
+;; Server-role validation: external Python clients spawn defport servers
+;; ============================================================================
+;;
+;; Complements the client-role tests above. Each of these spawns a
+;; Python script (stdlib only, no deps) that acts as a real external
+;; client and talks to defport's example server subprocess. If the
+;; Python client asserts a clean round-trip, defport's server is
+;; proven to speak the right wire to a different-language peer.
+
+(defn- run-python-client
+  "Spawn the Python helper script with `server-cmd` as the server
+   it should start. Returns [exit-code stdout stderr]."
+  [script & server-cmd]
+  (apply shell/sh "python3" script server-cmd))
+
+(defn- script-path [name]
+  (str "test/defport/integration/resources/" name))
+
+(deftest test-python-mcp-client-vs-defport-server
+  (testing "external Python MCP client spawns defport's MCP server and round-trips"
+    (if-not (available? "python3")
+      (skip "python3 not installed")
+      (let [r (run-python-client (script-path "external_mcp_client.py")
+                                 "clojure" "-M:examples" "-m" "mcp-server")]
+        (is (zero? (:exit r))
+            (str "external Python MCP client failed\n"
+                 "stderr:\n" (:err r)
+                 "\nstdout:\n" (:out r)))))))
+
+(deftest test-python-lsp-client-vs-defport-server
+  (testing "external Python LSP client spawns defport's LSP server and round-trips"
+    (if-not (available? "python3")
+      (skip "python3 not installed")
+      (let [r (run-python-client (script-path "external_lsp_client.py")
+                                 "clojure" "-M:examples" "-m" "lsp-server")]
+        (is (zero? (:exit r))
+            (str "external Python LSP client failed\n"
+                 "stderr:\n" (:err r)
+                 "\nstdout:\n" (:out r)))))))
+
+(deftest test-python-dap-client-vs-defport-server
+  (testing "external Python DAP client spawns defport's DAP server and round-trips"
+    (if-not (available? "python3")
+      (skip "python3 not installed")
+      (let [r (run-python-client (script-path "external_dap_client.py")
+                                 "clojure" "-M:examples" "-m" "dap-server")]
+        (is (zero? (:exit r))
+            (str "external Python DAP client failed\n"
+                 "stderr:\n" (:err r)
+                 "\nstdout:\n" (:out r)))))))
+
+(deftest test-dap-real-debugpy
+  (testing "defport DAP client can connect to debugpy.adapter"
+    (if-not (debugpy-available?)
+      (skip "debugpy not installed — python3 -m pip install --user debugpy")
+      (let [tx (dap-sub/transport ["python3" "-m" "debugpy.adapter"])
+            client (dap/create-client tx)
+            done (promise)]
+        (try
+          (dap/connect-async!
+            client
+            {:client-info {:name "defport-integration-test" :version "0.1.0"}
+             :adapter-id "python"}
+            (fn [c err] (deliver done [c err])))
+
+          ;; Cold Python subprocess can take a few seconds. 30s is generous.
+          (let [[c err] (deref done 30000 [::timeout nil])]
+            (is (not= ::timeout c)
+                "debugpy initialize handshake did not complete in 30s")
+            (is (nil? err) (str "initialize error: " err))
+            (when c
+              (is (true? (:initialized? @(:state* c))))
+              (let [caps (:adapter-capabilities @(:state* c))]
+                (is (map? caps) "debugpy should return a capability map")
+                ;; debugpy supports the standard DAP surface — some of
+                ;; these flags should be present.
+                (is (true? (:supportsConfigurationDoneRequest caps))
+                    "debugpy should support configurationDone"))))
+
+          (finally
+            (dap/disconnect! client)))))))
