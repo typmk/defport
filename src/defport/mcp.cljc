@@ -1414,7 +1414,6 @@
           (spec/wire-method :ping)                (fn [p ctx] (handle-ping p ctx server-info))
           (spec/wire-method :tools/list)          handle-tools-list
           (spec/wire-method :tools/call)          handle-tools-call
-          (spec/wire-method :tools/call-cancel)   handle-tools-call-cancel
           (spec/wire-method :prompts/list)        handle-prompts-list
           (spec/wire-method :prompts/get)         handle-prompts-get
           (spec/wire-method :resources/list)      handle-resources-list
@@ -1424,8 +1423,6 @@
           (spec/wire-method :resources/templates-list) (fn [_ _] {:resourceTemplates []})
           (spec/wire-method :roots/list)          (fn [p ctx] (handle-roots-list state* p ctx))
           (spec/wire-method :elicitation/create)  handle-elicitation-create
-          (spec/wire-method :elicitation/submit)  handle-elicitation-submit
-          (spec/wire-method :elicitation/cancel)  handle-elicitation-cancel
           (spec/wire-method :completion/complete) handle-completion-complete
           (spec/wire-method :logging/setLevel)    handle-logging-set-level}
 

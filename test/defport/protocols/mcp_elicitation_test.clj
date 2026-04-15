@@ -82,12 +82,17 @@
                   :action "accept"
                   :content {:value "response"}}
           result (core/protocol-dispatch adapter "elicitation/submit" params context)]
-      (is (= {} result))  ; Empty result on success
-      (let [elicitation (mcp/get-elicitation state* elicit-id)]
-        (is (= :accept (:action elicitation)))
-        (is (= {:value "response"} (:content elicitation))))))
+      ;; NOTE: elicitation/submit and elicitation/cancel are not part of
+      ;; MCP 2025-11-25. The spec uses elicitation/create (server→client)
+      ;; and the client answers via the response to that request. The
+      ;; tests for these legacy methods were removed when defport dropped
+      ;; the out-of-spec routes in Phase 8. The test fragment below is
+      ;; left with a dispatch call that now returns method-not-found —
+      ;; keeps the file compiling while documenting the deprecation.
+      (is (contains? result :error)
+          "elicitation/submit is not in MCP 2025-11-25 — route returns method-not-found")))
 
-  (testing "Validates elicitationId"
+  (testing "elicitation/submit no longer routed (deprecated pre-2025-11-25 method)"
     (let [adapter (mcp/create-mcp-adapter)
           registry (registry/create-function-registry)
           context {:port-registry registry}
@@ -95,29 +100,18 @@
                                           {:action "accept"}
                                           context)]
       (is (contains? result :error))
-      (is (= -32602 (get-in result [:error :code]))))))
+      (is (= -32601 (get-in result [:error :code]))
+          "method-not-found, not invalid-params, because the method was removed"))))
 
-(deftest test-handle-elicitation-cancel
-  (testing "Handles elicitation/cancel request"
-    (let [adapter (mcp/create-mcp-adapter)
-          state* (mcp/adapter-state adapter)
-          registry (registry/create-function-registry)
-          context {:port-registry registry}
-          ;; Create elicitation via adapter's state
-          elicit-id (mcp/create-elicitation state* "Test" {})
-          ;; Cancel it
-          params {:elicitationId elicit-id}
-          result (core/protocol-dispatch adapter "elicitation/cancel" params context)]
-      (is (= {} result))  ; Empty result on success
-      (is (nil? (mcp/get-elicitation state* elicit-id)))))  ; Should be removed
-
-  (testing "Validates elicitationId"
+(deftest test-elicitation-cancel-deprecated
+  (testing "elicitation/cancel is not in MCP 2025-11-25"
     (let [adapter (mcp/create-mcp-adapter)
           registry (registry/create-function-registry)
           context {:port-registry registry}
           result (core/protocol-dispatch adapter "elicitation/cancel" {} context)]
       (is (contains? result :error))
-      (is (= -32602 (get-in result [:error :code]))))))
+      (is (= -32601 (get-in result [:error :code]))
+          "Cancellation now uses $/cancelRequest / notifications/cancelled"))))
 
 (deftest test-elicitation-capability
   (testing "Reports elicitation capability in initialize"

@@ -90,14 +90,6 @@
     :handler-sym 'defport.mcp/handle-tools-call
     :doc         "Invoke a tool with arguments."}
 
-   :tools/call-cancel
-   {:method      "tools/call/cancel"
-    :kind        :request
-    :direction   :client->server
-    :capability  :tools
-    :handler-sym 'defport.mcp/handle-tools-call-cancel
-    :doc         "Cancel an in-flight tool call by id."}
-
    :notifications/tools-list-changed
    {:method      "notifications/tools/list_changed"
     :kind        :notification
@@ -222,22 +214,6 @@
     :handler-sym 'defport.mcp/handle-elicitation-create
     :doc         "Server asks client to present a form and return the user's response."}
 
-   :elicitation/submit
-   {:method      "elicitation/submit"
-    :kind        :request
-    :direction   :client->server
-    :capability  :elicitation
-    :handler-sym 'defport.mcp/handle-elicitation-submit
-    :doc         "Client submits the filled-out elicitation form."}
-
-   :elicitation/cancel
-   {:method      "elicitation/cancel"
-    :kind        :request
-    :direction   :both
-    :capability  :elicitation
-    :handler-sym 'defport.mcp/handle-elicitation-cancel
-    :doc         "Cancel a pending elicitation."}
-
    :notifications/elicitation-complete
    {:method      "notifications/elicitation/complete"
     :kind        :notification
@@ -282,7 +258,53 @@
     :direction   :server->client
     :capability  :logging
     :handler-sym nil
-    :doc         "Server emits a log message to the client."}})
+    :doc         "Server emits a log message to the client."}
+
+   ;; -------------------------------------------------------------------------
+   ;; Tasks API (MCP 2025-11-25)
+   ;; -------------------------------------------------------------------------
+   ;; Long-running operations that outlive a single request/response.
+   ;; Defport ships no default handlers — consumers register tool-style
+   ;; ports that drive the task lifecycle.
+   :tasks/list
+   {:method      "tasks/list"
+    :kind        :request
+    :direction   :client->server
+    :capability  :tasks
+    :handler-sym nil
+    :doc         "List in-flight long-running tasks."}
+
+   :tasks/get
+   {:method      "tasks/get"
+    :kind        :request
+    :direction   :client->server
+    :capability  :tasks
+    :handler-sym nil
+    :doc         "Get the current status of a task."}
+
+   :tasks/cancel
+   {:method      "tasks/cancel"
+    :kind        :request
+    :direction   :client->server
+    :capability  :tasks
+    :handler-sym nil
+    :doc         "Request cancellation of an in-flight task."}
+
+   :tasks/result
+   {:method      "tasks/result"
+    :kind        :request
+    :direction   :client->server
+    :capability  :tasks
+    :handler-sym nil
+    :doc         "Fetch the completed result of a task."}
+
+   :notifications/tasks-status
+   {:method      "notifications/tasks/status"
+    :kind        :notification
+    :direction   :server->client
+    :capability  :tasks
+    :handler-sym nil
+    :doc         "Server pushes status updates for an in-flight task."}})
 
 ;; ============================================================================
 ;; Lookups

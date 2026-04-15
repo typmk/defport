@@ -71,26 +71,23 @@
         events (->> (re-seq #"event: '([a-zA-Z]+)'" text) (map second) set sort vec)]
     events))
 
-(def ^:private mcp-2025-11-25-methods
-  "MCP 2025-11-25 method list, transcribed from modelcontextprotocol.io spec.
-   Updated when a new MCP spec revision is published."
-  #{"initialize" "ping"
-    "tools/list" "tools/call"
-    "prompts/list" "prompts/get"
-    "resources/list" "resources/read" "resources/subscribe"
-    "resources/unsubscribe" "resources/templates/list"
-    "roots/list"
-    "elicitation/create"
-    "sampling/createMessage"
-    "completion/complete"
-    "logging/setLevel"
-    "notifications/initialized" "notifications/cancelled"
-    "notifications/progress" "notifications/message"
-    "notifications/tools/list_changed"
-    "notifications/prompts/list_changed"
-    "notifications/resources/list_changed"
-    "notifications/resources/updated"
-    "notifications/roots/list_changed"})
+(defn- mcp-official-methods
+  "Read the MCP 2025-11-25 schema from resources/ and extract every
+   method const string. The schema ships in the repo at
+   resources/mcp-schema-2025-11-25.json — fetched from
+   https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/2025-11-25/schema.json
+   and committed so CI doesn't hit GitHub on every run."
+  []
+  (let [r (io/resource "mcp-schema-2025-11-25.json")
+        text (slurp r)
+        method-re #"\"const\"\s*:\s*\"([a-zA-Z]+(?:/[a-zA-Z/_]+)?)\""
+        candidates (->> (re-seq method-re text) (map second) set)]
+    (into #{}
+          (filter #(or (= % "initialize")
+                       (= % "ping")
+                       (and (.contains ^String % "/")
+                            (not (.startsWith ^String % "ref/")))))
+          candidates)))
 
 ;; ============================================================================
 ;; Report
@@ -137,7 +134,7 @@
         dap-evt-diff        (diff-sets dap-defport-evts dap-official-evts)
 
         mcp-defport   (map mcp-spec/wire-method (mcp-spec/all-method-names))
-        mcp-diff      (diff-sets mcp-defport mcp-2025-11-25-methods)]
+        mcp-diff      (diff-sets mcp-defport (mcp-official-methods))]
 
     (report-protocol "LSP 3.17 methods" lsp-diff)
     (report-protocol "DAP commands" dap-cmd-diff)

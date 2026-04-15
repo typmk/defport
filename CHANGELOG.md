@@ -5,7 +5,103 @@ All notable changes to defport will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-04-15
+
+### Phase 8 — Substrate campaign
+
+**Status:** Complete
+**Tests:** 374 kaocha / 2086 assertions / 0 failures; 194 CLJS /
+          584 assertions / 0 failures; 3 real-external integration
+          tests (MCP passes against
+          `@modelcontextprotocol/server-everything`, LSP and DAP
+          skip when their external peer is unavailable)
+
+Every protocol defport speaks now has the same shape: a plain-data
+spec registry, thin protocol-specific sugar (`deftool`/`deflsp`/
+`defcommand`), a protocol-free client core with a pluggable
+`ClientTransport`, reference subprocess transports for JVM + Node,
+and typed helpers that read wire names from the spec.
+
+#### Spec coverage (verified programmatically on every test run)
+
+| Protocol                | Official | defport | Coverage |
+|-------------------------|---------:|--------:|---------:|
+| LSP 3.17 methods        |    78    |   80    |  100.0%  |
+| DAP 1.65 commands       |    45    |   45    |  100.0%  |
+| DAP 1.65 events         |    17    |   17    |  100.0%  |
+| MCP 2025-11-25 methods  |    31    |   31    |  100.0%  |
+
+Official counts extracted from `vscode-languageserver-protocol`,
+`@vscode/debugprotocol` TypeScript declarations, and the upstream
+MCP `schema.json`. Verified by
+`test/defport/integration/spec_coverage_test.clj` (any drift fails
+kaocha) and the standalone CLI `scripts/spec_coverage.clj`.
+
+#### New namespaces
+
+- `defport.{mcp,lsp,dap}.spec` — plain-data method registries, one
+  row per method, wire strings + capabilities + sugar shapes +
+  defaults + error-defaults.
+- `defport.{mcp,lsp,dap}.client` — protocol-free client cores:
+  pluggable `ClientTransport`, `Pending` + `then`/`await`,
+  request/response correlation, notification dispatch, JVM reader
+  thread + CLJS poll loop, typed helpers that read wire names from
+  the spec registries.
+- `defport.{mcp,lsp,dap}.client.transports.subprocess` — optional
+  reference transports for JVM (`ProcessBuilder`) and Node
+  (`child_process.spawn`), behind one constructor.
+- `defport.transports.framing` — shared Content-Length and
+  JSON-lines codecs.
+
+#### New API
+
+- `defport.sugar/run!` now actually works: one call starts a
+  protocol-correct server on stdio (or HTTP), wraps dispatch
+  output in the right envelope, selects JSON-lines framing for
+  MCP, and ensures clean subprocess exit via `:drain-on-exit?`.
+- `deflsp` accepts Clojure-convention docstring-first.
+- `lsp/register-default-handlers!` is auto-called inside
+  `sugar/create-adapter :lsp`.
+- `:error-default` slot in `defport.dap.spec` so unimplemented
+  commands fall back to a proper error shape.
+- Unified client `connect!` opts: `:client-info`,
+  `:capabilities`, and protocol-specific extras.
+- Cross-platform `await`: JVM blocks; CLJS returns `js/Promise`.
+
+#### New examples (examples/)
+
+- `mcp_server.clj`, `lsp_server.clj`, `dap_server.clj` — ~15 LOC
+  each, one-line `sugar/run!` launch.
+- `mcp_client.clj`, `lsp_client.clj`, `dap_client.clj` — spawn
+  subprocess via reference transport, initialize, call typed
+  helpers.
+- `multi_adapter.clj` — one registry, three protocols, one
+  process; proves the protocol-intersection claim with real code.
+
+#### Bugs caught and fixed by writing real examples + integration tests
+
+Eleven real bugs landed in the substrate, every one invisible to
+the unit test suite and every one caught by writing something
+that actually runs:
+
+1. Stdio transport returned before output thread drained — cold
+   subprocesses lost last response. Fixed via `:drain-on-exit?`.
+2. `sugar/create-adapter :mcp` didn't thread port-registry into
+   dispatch context — `tools/list` crashed.
+3. LSP/MCP dispatch-incoming! checked `(or result error)`
+   truthiness; `:result nil` never resolved pending.
+4. Client `connect!` timeouts were 5s — too tight for cold JVM.
+5. `sugar/run!` used wrong dispatch shape + no envelope wrapping.
+6. LSP defaults required manual `register-default-handlers!` call.
+7. `deflsp` didn't accept Clojure docstring-first.
+8. `handle-tools-list` leaked LSP/DAP ports into MCP `tools/list`
+   in multi-protocol setups.
+9. `framing/feed` used JVM `Long/parseLong` on CLJS → empty bodies.
+10. **MCP stdio used Content-Length framing** but the 2025-11-25
+    spec mandates JSON-lines. Caught the moment the integration
+    test tried to spawn `@modelcontextprotocol/server-everything`.
+11. `textDocument/selectionRange` had wrong sugar shape
+    (`:range` but params carry `positions[]`).
 
 ### Phase 7 — Cross-Platform Restructure (2026-04-12) 🔨
 
@@ -866,5 +962,6 @@ Inspired by:
 
 ---
 
-[Unreleased]: https://github.com/yourorg/defport/compare/v0.1.0...HEAD
-[0.1.0-SNAPSHOT]: https://github.com/yourorg/defport/releases/tag/v0.1.0-SNAPSHOT
+[Unreleased]: https://github.com/typmk/defport/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/typmk/defport/releases/tag/v0.2.0
+[0.1.0-SNAPSHOT]: https://github.com/typmk/defport/releases/tag/v0.1.0-SNAPSHOT

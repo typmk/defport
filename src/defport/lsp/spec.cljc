@@ -338,7 +338,9 @@
     :kind       :request
     :direction  :client->server
     :capability :selectionRangeProvider
-    :sugar      :range
+    ;; Params: {textDocument, positions: Position[]}. Multi-position
+    ;; input has no clean sugar shape — consumers destructure :raw.
+    :sugar      :raw
     :default    (constantly [])
     :doc        "Compute selection ranges (smart-select-up tree)."}
 

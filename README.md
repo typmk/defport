@@ -1,43 +1,150 @@
 # defport
 
-**Synchronous, cross-platform, protocol-adapter library for building MCP, LSP, and DAP servers in Clojure/ClojureScript.**
+**A Clojure/ClojureScript library for building MCP, LSP, and DAP servers and clients.**
 
-Defport is to MCP what Ring is to HTTP: a thin, opinion-free adapter layer between JSON-RPC-on-the-wire and your handler functions. Build MCP, LSP, and DAP servers on JVM or Node with the same code.
+Defport is to protocol work what Ring is to HTTP: a thin, opinion-free
+adapter layer between JSON-RPC-on-the-wire and your handler functions.
+Define each capability once, surface it through three protocols, on
+JVM or Node.
 
 ## Status
 
-**Tests:** 304 tests, 1,856 assertions, 0 failures
-**MCP spec:** 100% MCP 2025-11-25 compliant
-**Cross-platform:** JVM + Node (CLJS). Core library compiles clean on both.
+**Tests:** 374 kaocha / 2,086 assertions / 0 failures. 194 CLJS /
+584 assertions / 0 failures. 3 real-external integration tests
+(MCP passes against
+[`@modelcontextprotocol/server-everything`](https://www.npmjs.com/package/@modelcontextprotocol/server-everything);
+LSP + DAP skip cleanly when their external peer isn't installed).
 
-| Phase | Status | Highlights |
-|-------|--------|------------|
-| Phase 1: Core Infrastructure | ✅ Complete | Ports, Transports, Registries, four core protocols |
-| Phase 2: MCP Protocol | ✅ Complete | 100% MCP 2025-11-25 spec compliance |
-| Phase 3: Advanced Features | ✅ Complete | Elicitation, Completions, Roots, Sampling, Progress |
-| Phase 4: Performance | ✅ Complete | Concurrent batch processing (4 strategies) |
-| Phase 5: Integration & Docs | ✅ Complete | ARCHITECTURE.md, INTEGRATION.md, tap> observability, datafy/nav |
-| Phase 6: State Refactor | ✅ Complete | Per-adapter instance state (no more global atoms) |
-| Phase 7: Cross-Platform Restructure | ✅ Complete | Scoped to server-adapter role, reader conditionals −67% |
-| Phase 8: LSP/DAP Server Hardening | 🔮 Future | Real end-to-end coverage for LSP/DAP adapters |
+**Spec coverage** — verified programmatically on every test run
+against `vscode-languageserver-protocol`, `@vscode/debugprotocol`,
+and the upstream MCP `schema.json`:
+
+| Protocol                | Official | defport | Coverage |
+|-------------------------|---------:|--------:|---------:|
+| LSP 3.17 methods        |    78    |   80    |  100.0%  |
+| DAP 1.65 commands       |    45    |   45    |  100.0%  |
+| DAP 1.65 events         |    17    |   17    |  100.0%  |
+| MCP 2025-11-25 methods  |    31    |   31    |  100.0%  |
+
+**Cross-platform:** JVM + Node (CLJS). Every `.cljc` namespace
+compiles clean on both.
 
 ---
 
-## Quick Start — JVM
+## Quick start — MCP server
 
 ```clojure
-(ns my-server
-  (:require [mcp :as m]))
+(ns my-mcp-server
+  (:require [defport.mcp :as mcp]
+            [defport.sugar :as sugar]))
 
-(m/deftool greet
-  "Greet a user"
-  [name :- :string]
-  {:greeting (str "Hello, " name "!")})
+(mcp/deftool search
+  "Search for code by pattern."
+  [pattern :- :string]
+  {:content [{:type "text" :text (my/search pattern)}]})
 
-(m/run! {:name "my-server" :version "1.0.0"})
+(defn -main [& _]
+  (sugar/run! {:protocol :mcp
+               :server-info {:name "my-mcp-server" :version "1.0.0"}}))
 ```
 
-One require, define your tools, run. Works with Claude Desktop, Cursor, and any MCP client.
+Defport supplies everything else: `tools/list`, `tools/call`,
+capability negotiation, JSON-lines framing (per MCP 2025-11-25),
+cancellation state, lifecycle handlers. For
+`examples/mcp_server.clj` that's **13 lines of user code**. Point
+Claude Desktop, Cursor, or MCP Inspector at it via stdio.
+
+## Quick start — LSP server
+
+```clojure
+(ns my-lsp-server
+  (:require [defport.lsp :as lsp]
+            [defport.sugar :as sugar]))
+
+(lsp/deflsp hover
+  "Return hover info at a position."
+  [uri :- :string line :- :int col :- :int]
+  {:contents {:kind "markdown" :value (my/explain-at uri line col)}})
+
+(lsp/deflsp references
+  "Find references to the symbol at a position."
+  [uri :- :string line :- :int col :- :int]
+  (my/references-at uri line col))
+
+(defn -main [& _]
+  (sugar/run! {:protocol :lsp
+               :server-info {:name "my-lsp-server" :version "1.0.0"}}))
+```
+
+`deflsp` reads sugar shapes from `defport.lsp.spec` at macroexpansion
+time — position, range, document, rename shapes are pre-extracted
+from raw LSP params. Capabilities derive from registered ports, so
+`hoverProvider` and `referencesProvider` show up in the `initialize`
+response without you writing a capability map.
+
+## Quick start — DAP server
+
+```clojure
+(ns my-dap-server
+  (:require [defport.dap :as dap]
+            [defport.sugar :as sugar]))
+
+(dap/defcommand evaluate
+  "Evaluate an expression in the top stack frame."
+  [expression :- :string frameId :- :int]
+  {:result (my/eval-in-frame expression frameId)
+   :variablesReference 0})
+
+(defn -main [& _]
+  (sugar/run! {:protocol :dap
+               :server-info {:name "my-dap-server" :version "1.0.0"}
+               :backend :repl}))
+```
+
+`defcommand` resolves `:step-in` → `"stepIn"`,
+`:set-breakpoints` → `"setBreakpoints"` automatically via the DAP
+spec registry — correct camelCase wire names without touching them.
+
+## Quick start — talking to external servers
+
+MCP client spawning `@modelcontextprotocol/server-filesystem`:
+
+```clojure
+(require '[defport.mcp.client :as mcp]
+         '[defport.mcp.client.transports.subprocess :as sub])
+
+(def fs
+  (-> (sub/transport ["npx" "-y" "@modelcontextprotocol/server-filesystem" "/tmp"])
+      (mcp/create-client)
+      (mcp/connect! {:client-info {:name "my-client" :version "0.1.0"}})))
+
+(mcp/await (mcp/list-tools fs))
+(mcp/await (mcp/call-tool fs "read_file" {:path "/tmp/foo.txt"}))
+```
+
+Same shape for `defport.lsp.client` against rust-analyzer or
+clojure-lsp, and `defport.dap.client` against debugpy. Each ships
+18–30 typed convenience helpers reading wire names from its spec
+registry.
+
+## Multi-protocol in one process
+
+```clojure
+(mcp/deftool find-callers [symbol :- :string]
+  {:content [{:type "text" :text (pr-str (graph/callers symbol))}]})
+
+(lsp/deflsp references [uri :- :string line :- :int col :- :int]
+  (graph/references-at uri line col))
+
+(dap/defcommand evaluate [expression :- :string frameId :- :int]
+  {:result (graph/eval expression frameId)})
+```
+
+Three adapters, three protocols, one shared registry. Each adapter
+filters `defport.sugar/*registry*` for its own metadata
+(`:mcp/tool`, `:lsp/method`, `:dap/command`). The protocols never
+see each other's ports but share the same underlying logic. See
+`examples/multi_adapter.clj`.
 
 ## Quick Start — Node (CLJS)
 

@@ -40,24 +40,29 @@
     (when (.exists f)
       (into #{} (map second) (re-seq #"event: '([a-zA-Z]+)'" (slurp f))))))
 
-(def ^:private mcp-2025-11-25-methods
-  #{"initialize" "ping"
-    "tools/list" "tools/call"
-    "prompts/list" "prompts/get"
-    "resources/list" "resources/read" "resources/subscribe"
-    "resources/unsubscribe" "resources/templates/list"
-    "roots/list"
-    "elicitation/create"
-    "sampling/createMessage"
-    "completion/complete"
-    "logging/setLevel"
-    "notifications/initialized" "notifications/cancelled"
-    "notifications/progress" "notifications/message"
-    "notifications/tools/list_changed"
-    "notifications/prompts/list_changed"
-    "notifications/resources/list_changed"
-    "notifications/resources/updated"
-    "notifications/roots/list_changed"})
+(defn- mcp-official-methods
+  "Read the MCP 2025-11-25 schema from resources/ and extract every
+   method const string. Falls back to returning nil if the schema
+   isn't on the classpath so this test skips rather than fails."
+  []
+  (let [r (io/resource "mcp-schema-2025-11-25.json")]
+    (when r
+      (let [text (slurp r)
+            ;; Method constants in the schema look like
+            ;;   \"method\": {\"const\": \"foo/bar\"}
+            ;; but also some non-method consts (content types) show
+            ;; up. Filter to namespaced/method-shaped strings only.
+            method-re #"\"const\"\s*:\s*\"([a-zA-Z]+(?:/[a-zA-Z/_]+)?)\""
+            candidates (->> (re-seq method-re text)
+                            (map second)
+                            set)]
+        (into #{}
+              (filter #(or (= % "initialize")
+                           (= % "ping")
+                           (and (.contains ^String % "/")
+                                ;; Exclude type refs like ref/prompt, ref/resource.
+                                (not (.startsWith ^String % "ref/")))))
+              candidates)))))
 
 (defn- assert-covers [label defport-set official-set]
   (let [missing (set/difference official-set defport-set)]
@@ -93,7 +98,9 @@
       (is true "@vscode/debugprotocol not in node_modules — skipping"))))
 
 (deftest test-mcp-covers-official
-  (testing "every MCP 2025-11-25 method is in defport.mcp.spec"
-    (let [defport-methods (into #{} (map mcp-spec/wire-method)
-                                (mcp-spec/all-method-names))]
-      (assert-covers "MCP" defport-methods mcp-2025-11-25-methods))))
+  (testing "every MCP 2025-11-25 method from the upstream schema is in defport.mcp.spec"
+    (if-let [official (mcp-official-methods)]
+      (let [defport-methods (into #{} (map mcp-spec/wire-method)
+                                  (mcp-spec/all-method-names))]
+        (assert-covers "MCP" defport-methods official))
+      (is true "resources/mcp-schema-2025-11-25.json not on classpath — skipping"))))
