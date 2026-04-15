@@ -27,13 +27,17 @@
 #?(:clj
    (do
      (defn- start-reader-thread!
+       "MCP stdio uses newline-delimited JSON per the 2025-11-25 spec
+        (not Content-Length framing like LSP/DAP). The reader thread
+        feeds bytes into `framing/feed-lines` and pushes parsed
+        messages onto a LinkedBlockingQueue."
        [^Process process queue alive?*]
        (let [in  ^InputStream (.getInputStream process)
              buf (byte-array 8192)]
          (doto (Thread.
                  ^Runnable
                  (fn []
-                   (loop [decoder (framing/empty-state)]
+                   (loop [decoder (framing/empty-state-lines)]
                      (when @alive?*
                        (let [n (try (.read in buf 0 (alength buf))
                                     (catch Exception _ -1))]
@@ -48,7 +52,7 @@
                            :else
                            (let [chunk (byte-array n)]
                              (System/arraycopy buf 0 chunk 0 n)
-                             (let [[msgs new-decoder] (framing/feed decoder chunk)]
+                             (let [[msgs new-decoder] (framing/feed-lines decoder chunk)]
                                (doseq [m msgs]
                                  (.put ^LinkedBlockingQueue queue m))
                                (recur new-decoder)))))))))
@@ -91,7 +95,7 @@
        (transport-send! [this msg]
          (when-let [^Process proc @process*]
            (let [^OutputStream out (.getOutputStream proc)
-                 ^bytes encoded (framing/encode-message msg)]
+                 ^bytes encoded (framing/encode-line msg)]
              (locking write-lock
                (.write out encoded)
                (.flush out))))
@@ -142,10 +146,11 @@
                             #js {:stdio "pipe"})]
            (reset! process* proc)
            (reset! alive?* true)
-           (reset! decoder* (framing/empty-state))
+           ;; MCP stdio uses JSON-lines, not Content-Length framing.
+           (reset! decoder* (framing/empty-state-lines))
            (.on (.-stdout proc) "data"
                 (fn [chunk]
-                  (let [[msgs new-decoder] (framing/feed @decoder* chunk)]
+                  (let [[msgs new-decoder] (framing/feed-lines @decoder* chunk)]
                     (reset! decoder* new-decoder)
                     (doseq [m msgs] (.push recv-queue m)))))
            (.on (.-stderr proc) "data"
@@ -160,7 +165,7 @@
 
        (transport-send! [this msg]
          (when-let [proc @process*]
-           (let [encoded (framing/encode-message msg)]
+           (let [encoded (framing/encode-line msg)]
              (.write (.-stdin proc) encoded)))
          this)
 

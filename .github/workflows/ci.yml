@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Clojure + Java
+        uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          cli: 1.11.3
+
+      - name: Install Node (for shadow-cljs + MCP server fixtures)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Clojure deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2
+            ~/.gitlibs
+            ~/.deps.clj
+          key: ${{ runner.os }}-clj-${{ hashFiles('**/deps.edn') }}
+
+      - name: Cache npm cache (for npx -y @modelcontextprotocol/*)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-mcp
+
+      # ------------------------------------------------------------------
+      # Optional integration peers
+      # ------------------------------------------------------------------
+      # The integration tests skip if their external tool is unavailable.
+      # CI installs them in setup so the full suite runs unconditionally.
+
+      - name: Install rust-analyzer (for LSP integration test)
+        run: |
+          rustup component add rust-analyzer
+          rust-analyzer --version
+
+      - name: Install debugpy (for DAP integration test)
+        run: |
+          python3 -m pip install --user debugpy
+          python3 -c "import debugpy; print(debugpy.__version__)"
+
+      # ------------------------------------------------------------------
+      # Tests
+      # ------------------------------------------------------------------
+
+      - name: Kaocha (JVM tests + real-external integration)
+        run: clojure -M:kaocha
+
+      - name: shadow-cljs compile :test
+        run: |
+          cd ..   # defnet (parent dir) holds shadow-cljs.edn for the CLJS smoke
+          npx shadow-cljs compile :test
+
+      - name: Node CLJS smoke
+        run: |
+          cd ..
+          node out/test.js

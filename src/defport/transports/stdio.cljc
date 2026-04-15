@@ -174,6 +174,76 @@
            (async/close! done))
          [messages done]))
 
+     ;; ----------------------------------------------------------------------
+     ;; JSON-lines framing variant — the MCP 2025-11-25 stdio format
+     ;; ----------------------------------------------------------------------
+     ;;
+     ;; MCP's stdio transport sends newline-delimited JSON, NOT
+     ;; Content-Length framed bytes. LSP and DAP still use the
+     ;; Content-Length path above. The create-stdio-transport
+     ;; constructor picks which framing style to use via the
+     ;; :framing option (:content-length default, or :jsonlines).
+
+     (defn- read-line-message
+       "Read one JSON-lines message from the input stream. Returns the
+        parsed clj map, or ::eof when the stream closes, or a
+        {:parse-error ...} map on malformed JSON."
+       [^InputStream input]
+       (let [sb (StringBuilder.)]
+         (loop []
+           (let [b (try (.read input) (catch Exception _ -1))]
+             (cond
+               (neg? b)  (if (pos? (.length sb))
+                           (try (json/parse-string (str sb) true)
+                                (catch Exception e
+                                  {:parse-error true :exception e}))
+                           ::eof)
+               (= b 10)  (if (pos? (.length sb))
+                           (try (json/parse-string (str sb) true)
+                                (catch Exception e
+                                  {:parse-error true :exception e}))
+                           (recur))
+               :else     (do (.append sb (char b)) (recur)))))))
+
+     (defn- write-line-message
+       "Write a JSON message followed by a newline. Thread-safe."
+       [^OutputStream output msg]
+       (let [line (str (json/generate-string msg) "\n")
+             bytes (.getBytes line "utf-8")]
+         (locking write-lock
+           (.write output bytes)
+           (.flush output))))
+
+     (defn- input-stream->input-chan-lines
+       [^InputStream input]
+       (let [messages (async/chan 1)]
+         (async/thread
+           (try
+             (loop []
+               (let [msg (read-line-message input)]
+                 (cond
+                   (= msg ::eof) (async/close! messages)
+                   :else (when (async/>!! messages msg) (recur)))))
+             (catch Exception _e
+               (async/close! messages))))
+         messages))
+
+     (defn- output-stream->output-chan-lines
+       [^OutputStream output]
+       (let [messages (async/chan 1)
+             done     (async/chan 1)]
+         (async/thread
+           (try
+             (loop []
+               (when-let [msg (async/<!! messages)]
+                 (write-line-message output msg)
+                 (recur)))
+             (catch Exception _e
+               nil))
+           (try (.flush output) (catch Exception _))
+           (async/close! done))
+         [messages done]))
+
      (defrecord StdioTransport [running?*
                                 input-ch
                                 output-ch
@@ -182,7 +252,8 @@
                                 stderr
                                 process-thread
                                 drain-on-exit?
-                                out-done*]
+                                out-done*
+                                framing]
        core/Transport
        (transport-id [_] :stdio)
 
@@ -190,8 +261,12 @@
          (reset! running?* true)
          (let [in-stream (or @input-stream System/in)
                 out-stream (or @output-stream System/out)
-                in-ch (input-stream->input-chan in-stream)
-                [out-ch out-done] (output-stream->output-chan out-stream)]
+                in-ch (case framing
+                        :jsonlines     (input-stream->input-chan-lines in-stream)
+                        (input-stream->input-chan in-stream))
+                [out-ch out-done] (case framing
+                                    :jsonlines (output-stream->output-chan-lines out-stream)
+                                    (output-stream->output-chan out-stream))]
            (reset! input-ch in-ch)
            (reset! output-ch out-ch)
            (reset! out-done* out-done)
@@ -359,7 +434,8 @@
         (atom (or (:stderr opts) *err*))          ; stderr
         (atom nil)                                ; process-thread
         (boolean (:drain-on-exit? opts))          ; drain-on-exit?
-        (atom nil))                               ; out-done*
+        (atom nil)                                ; out-done*
+        (or (:framing opts) :content-length))     ; framing
 
       :cljs
       (if (exists? js/process)

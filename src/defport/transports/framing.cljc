@@ -1,21 +1,30 @@
 (ns defport.transports.framing
-  "Content-Length framed JSON-RPC encoding/decoding.
+  "Wire framing for JSON-RPC over byte streams.
 
-  LSP and DAP both wrap their JSON payloads with this framing:
+  Two codecs, one namespace:
+
+  ## Content-Length (LSP + DAP)
 
       Content-Length: 64\\r\\n
       \\r\\n
       <64 bytes of JSON UTF-8>
 
-  This namespace provides pure functions that:
-   - encode a clj map → byte array suitable for direct write
-   - decode an incoming byte stream → a sequence of parsed clj maps,
-     preserving any trailing partial frame as accumulator state
+  LSP and DAP both wrap their payloads this way. Entry points:
+    - `encode-message` / `empty-state` / `feed`
 
-  All functions are platform-free and unit-testable. Used by the
-  client-side subprocess transports (defport.lsp.client.transports.*,
-  defport.dap.client.transports.*) and reusable by anything else that
-  speaks framed JSON-RPC over a byte channel."
+  ## JSON-lines (MCP 2025-11-25)
+
+      {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"foo\"}\\n
+      {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"bar\"}\\n
+
+  The MCP 2025-11-25 stdio transport specifies newline-delimited
+  JSON, not Content-Length framing. Messages must not contain
+  embedded newlines. Entry points:
+    - `encode-line` / `empty-state-lines` / `feed-lines`
+
+  All functions are pure and platform-free. Used by the subprocess
+  transports (defport.*.client.transports.*) and reusable by anything
+  else that speaks framed JSON-RPC over a byte channel."
   (:require [defport.util.platform :as platform :include-macros true])
   #?(:clj (:import [java.nio.charset StandardCharsets])))
 
@@ -196,3 +205,73 @@
                       :phase :headers
                       :headers {}}
                      (conj msgs parsed)))))))))
+
+;; ============================================================================
+;; JSON-lines codec (MCP 2025-11-25 stdio transport)
+;; ============================================================================
+
+(defn encode-line
+  "Encode a clj map as a single JSON-lines message — serialize to
+   JSON, append a newline. Returns a byte array on JVM, a Buffer on
+   Node. No Content-Length header.
+
+   Use this for MCP stdio; LSP and DAP stdio still use
+   `encode-message` (Content-Length framing)."
+  [message]
+  (let [json (platform/json-encode message)
+        line (str json "\n")]
+    #?(:clj  (.getBytes ^String line StandardCharsets/UTF_8)
+       :cljs (.from js/Buffer line "utf8"))))
+
+(defn empty-state-lines
+  "Initial decoder state for the JSON-lines codec. Pass to `feed-lines`
+   for the first chunk."
+  []
+  {:buffer #?(:clj (byte-array 0) :cljs (.alloc js/Buffer 0))})
+
+(defn- find-newline
+  "Offset just past the next \\n in buffer, or -1 if not present."
+  [buffer]
+  #?(:clj
+     (let [^bytes b buffer
+           len (alength b)]
+       (loop [i 0]
+         (cond
+           (>= i len) -1
+           (= (aget b i) (byte 10)) (inc i)
+           :else (recur (inc i)))))
+     :cljs
+     (let [len (.-length buffer)]
+       (loop [i 0]
+         (cond
+           (>= i len) -1
+           (= (.readUInt8 buffer i) 10) (inc i)
+           :else (recur (inc i)))))))
+
+(defn feed-lines
+  "Feed a chunk of bytes (or Buffer on Node) into the JSON-lines
+   decoder. Returns `[messages new-state]`. Lines that fail JSON
+   parse become `{::parse-error ... ::raw ...}` maps so the stream
+   stays aligned.
+
+   Empty lines are skipped silently — real-world MCP implementations
+   sometimes emit extra whitespace around messages."
+  [state chunk]
+  (let [combined (if (and chunk (pos? (buffer-length chunk)))
+                   (buffer-concat (:buffer state) chunk)
+                   (:buffer state))]
+    (loop [buf  combined
+           msgs []]
+      (let [end (find-newline buf)]
+        (if (neg? end)
+          [msgs {:buffer buf}]
+          (let [line-str (buffer-string buf 0 (dec end) "UTF-8")
+                rest-buf (buffer-slice buf end (buffer-length buf))]
+            (if (clojure.string/blank? line-str)
+              (recur rest-buf msgs)
+              (let [parsed (try
+                             (platform/json-decode line-str)
+                             (catch #?(:clj Exception :cljs js/Error) e
+                               {::parse-error (platform/error-message e)
+                                ::raw line-str}))]
+                (recur rest-buf (conj msgs parsed))))))))))

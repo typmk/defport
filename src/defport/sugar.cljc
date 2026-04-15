@@ -577,7 +577,12 @@
   (let [registry (or registry *registry*)
         adapter  (create-adapter protocol (assoc opts :server-info server-info))
         handler  (build-handler protocol adapter registry)
-        stdio-opts (merge {:drain-on-exit? true} transport-opts)
+        ;; MCP 2025-11-25 stdio uses JSON-lines (newline-delimited JSON).
+        ;; LSP and DAP use Content-Length framing. Pick the right framing
+        ;; automatically so consumers never have to know.
+        default-framing (if (= protocol :mcp) :jsonlines :content-length)
+        stdio-opts (merge {:drain-on-exit? true :framing default-framing}
+                          transport-opts)
         t        (cond
                    (satisfies? core/Transport transport) transport
                    (= transport :stdio) (stdio-transport/create-stdio-transport stdio-opts)
