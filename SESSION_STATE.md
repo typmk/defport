@@ -1,291 +1,107 @@
-# Session State: Phase 7 COMPLETE — Cross-Platform Restructure
+# Session state — v0.3.0 tagged (2026-04-15)
 
-**Phase:** 7 — Cross-Platform Restructure
-**Status:** ✅ **COMPLETE** (2026-04-12)
-**Tests:** 304 tests, 1,856 assertions, 0 failures
-**Goal:** Scope defport honestly to server-adapter role; concentrate
-platform-specific code; ship a truly cross-platform core.
-
----
-
-## Phase 7 Completion Summary
-
-### The big changes
-
-This phase combined three interlocking improvements:
-
-1. **State refactor** — eliminated 8 global `defonce` atoms in the MCP
-   adapter, replaced with a single atom-of-map owned by each adapter
-   instance. Multi-server-per-process now works.
-
-2. **Scope correction** — removed subprocess client features that
-   don't fit defport's role. `defport.mcp-client`, `dap-client`,
-   `lsp-client` modules deleted. `McpClient` record + 13 `client-*`
-   functions deleted. Four vestigial "not yet implemented" stubs
-   deleted. **~1,600 lines of unused speculative code gone.**
-
-3. **Reader conditional concentration** — 225 → 74 (−67%) total,
-   whole-def structural conditionals 92 → 8 (−91%). Platform-specific
-   code now lives in `defport.util.platform` where it belongs.
-   Core adapter files (`defport/mcp.cljc`, `defport/dap.cljc`,
-   `defport/lsp.cljc`) are essentially cross-platform.
-
-### Completed items ✅
-
-1. **Fixed namespace drift** — `defport.protocols.mcp` → `defport.mcp`
-   propagated across 36 files. Test suite became runnable for the
-   first time since commit 2d7918e.
-
-2. **Fixed `register-port!` shadowing bug** — the `defn register-port!`
-   in `defport.core` was clobbering the `PortRegistry` protocol method
-   with the same name. Renamed the global convenience to
-   `register-global-port!`. Protocol dispatch now works as documented.
-
-3. **State refactor** — 8 `defonce` atoms → single `create-protocol-state`
-   atom per adapter. `active-operations` flattened from nested
-   `(atom false)` flags to `:active-operations` / `:cancelled-operations`
-   sets. Client-side state (3 more globals) also consolidated —
-   then deleted entirely when client mode was removed.
-
-4. **`Unwrappable` extension point** — `platform/unwrap` handles
-   user-supplied async return types (future, promise, delay, manifold
-   deferred via `requiring-resolve`). Zero hard deps on async libraries.
-   Threaded through three dispatch sites: `tools/call`, `prompts/get`,
-   `resources/read`. Five tests verify the contract end-to-end.
-
-5. **`platform/try-any` macro** — catches `Throwable` on JVM,
-   `:default` on CLJS via `(:ns &env)` detection. Eliminates
-   `catch` reader conditionals at call sites. Supports optional
-   `finally` clauses.
-
-6. **Node (CLJS) stdio transport** — synchronous `readline` callbacks,
-   supports handler Promise returns via `.then` chaining. Core
-   server path compiles clean on Node.
-
-7. **Compliance validator fixed** — `validate-field-naming` no longer
-   recurses into user-defined JSON Schema. Unblocks tools with
-   Python-style `user_id`/`error_message` field names.
-
-8. **Metadata forwarding** — `handle-tools-call` now preserves
-   `:metadata` from handler results so tools can return sampling
-   request info, progress hints, etc.
-
-9. **Server capabilities corrected** — `:listChanged true` now
-   advertised for tools/prompts/resources (was `false` despite the
-   adapter supporting notifications).
-
-10. **Subprocess client features removed** (the scope correction).
-    Zero tests, zero callers, wrong scope. Users needing client-role
-    features implement `ProtocolClient` in their own code.
-
-11. **Documentation** — `docs/ARCHITECTURE.md` gained major sections
-    on Concurrency Model and Protocol Intersection. Six design
-    principles codified in `CLAUDE.md`.
-
-### Files created
-
-```
-New JVM-only file (extracted test harness):
-  src/defport/testing/client.clj  (renamed from .cljc, removed all
-                                   #?(:clj ...) wrappers since it was
-                                   always JVM-only in spirit)
-```
-
-### Files deleted
-
-```
-Subprocess client modules (scope correction):
-  src/defport/mcp_client.clj    (~350 lines)
-  src/defport/dap_client.clj    (~430 lines)
-  src/defport/lsp_client.clj    (~250 lines)
-```
-
-### Files modified
-
-```
-Source:
-  src/defport/core.cljc         (−132: removed create-server, start!,
-                                 stop!, create-client stubs; updated
-                                 ProtocolClient docstring)
-  src/defport/mcp.cljc          (−481: McpClient record + 13 client-*
-                                 functions removed; state refactor;
-                                 unwrap plumbed through)
-  src/defport/dap.cljc          (JVM-only code extracted then removed)
-  src/defport/lsp.cljc          (JVM-only code extracted then removed;
-                                 platform/utf8-byte-length, process-id
-                                 used)
-  src/defport/sugar.cljc        (start-transport! / stop-transport!
-                                 made cross-platform)
-  src/defport/inspect.cljc      (datafy extend-type unified across
-                                 platforms)
-  src/defport/util/platform.cljc (error-message, error-type, try-any,
-                                  unwrap, process-id, utf8-byte-length
-                                  added)
-  src/defport/util/batch.cljc   (pmap-batch CLJS branch fixed)
-  src/defport/util/edn.cljc     (clojure.reader/read-string typo fixed)
-  src/defport/util/progress.cljc (uses platform/json-encode)
-  src/defport/transports/stdio.cljc (Node CLJS impl with Promise chaining)
-  src/defport/transports/http.cljc  (uses platform/json-encode)
-  src/defport/testing/server.cljc   (uses platform/try-any)
-  src/mcp.cljc                  (client mode section removed)
-  src/dap.cljc                  (client mode section removed)
-  src/lsp.cljc                  (client mode section removed; run!
-                                 block-forever made cross-platform)
-  test/defport/protocols/mcp_test.clj (5 new unwrap tests)
-
-Docs:
-  docs/ARCHITECTURE.md  (+Concurrency Model, +Protocol Intersection)
-  CLAUDE.md             (+Core Design Principles section)
-  README.md             (status, quick-start, cross-platform section)
-  ROADMAP.md            (Phase 7 complete, Phase 8+ planned)
-  CHANGELOG.md          (Phase 7 entry added)
-  SESSION_STATE.md      (this file)
-```
-
-### Metrics
-
-| Metric | Before Phase 7 | After |
-|--------|---------------:|------:|
-| Tests | Unrunnable | 304 |
-| Assertions | — | 1,856 |
-| Failures | Couldn't load | 0 |
-| Reader conditionals (total) | 225 | 74 |
-| Whole-def conditionals | 92 | 8 |
-| Global `defonce` atoms in McpAdapter | 8 | 0 |
-| Client-side global atoms | 3 | 0 |
-| Lines of source code | ~11,100 | ~9,500 |
-| Core library CLJS compile | Broken (namespace drift) | Clean |
+**Tag:** `v0.3.0`
+**Tests:** 379 kaocha / 2,103 assertions / 0 failures
+**CLJS smoke:** 194 tests / 584 assertions / 0 failures (via defnet)
+**Spec coverage:** 100% across MCP / LSP / DAP / BSP / CDP / rosbridge
+**Real external integration tests:** 8 passing, zero skipped on CI-installable tools
 
 ---
 
-## Next Phase: Phase 8 — LSP/DAP Server Hardening
+## What shipped in 0.3.0
 
-**Priority:** Medium
-**Prerequisites:** None (all phases 1-7 complete)
+### New protocols (first-class substrate entries)
 
-### 8.1 Real LSP test coverage
+- **BSP 2.2** — `defport.bsp.{spec,client}` + subprocess transport. 27
+  methods from the upstream Smithy spec. Full parity with LSP/DAP.
+- **CDP 1.3** — `defport.cdp.{spec,client}` + WebSocket transport.
+  901 entries (664 commands + 237 events × 56 domains) auto-derived
+  from upstream `browser_protocol.json` + `js_protocol.json` at load
+  time — zero drift risk. Validated against real Chromium 142 via
+  `java.net.http.WebSocket`.
+- **rosbridge v2.0** — `defport.ros2.{spec,client}` + WebSocket
+  transport. 20 ops. Clojure ↔ ROS 2 without DDS or FFI.
 
-Defport's LSP server adapter exists but has no end-to-end tests against
-a real editor. Building real test coverage would:
+### New transport
 
-- Validate the adapter against actual LSP client expectations
-- Surface bugs in method routing, capability negotiation, document sync
-- Enable production use of defport as an LSP server backend
+- **`defport.transports.websocket-client`** — generic JSON-over-WebSocket
+  `ClientTransport` shared between CDP and rosbridge. JVM uses
+  `java.net.http.WebSocket` (JDK 11+, zero new deps); Node uses the
+  global `WebSocket` or the `ws` npm package.
 
-**Approach:** Either spawn a real LSP client in tests (headless editor
-or scripted protocol test harness) or use `clojure-lsp` as a reference
-implementation to test against.
+### New examples
 
-### 8.2 Real DAP test coverage
+- **`examples/industrial_mcp.clj`** — 6 deftools over a mock SCADA
+  backend. Canonical pattern for wrapping OPC UA / Modbus / DNP3 /
+  IEC 61850 behind MCP for AI assistants.
+- **`examples/robotics_mcp.clj`** — MCP server bridging to a live ROS 2
+  robot via `defport.ros2.client`.
 
-Only REPL-mode breakpoint/stepping stubs are tested. Full DAP needs
-validation against an actual debug UI.
+### Real external integration tests
 
-### 8.3 Cross-protocol port routing
-
-The port abstraction was designed so one definition could be exposed
-via all three protocols. Today there's no example showing a single
-port serving MCP + LSP + DAP simultaneously. Build one, document it,
-or simplify the design if it's not actually useful.
-
-### 8.4 CLJS/Node end-to-end server
-
-The core compiles clean on Node but hasn't been validated with Claude
-Desktop or another real MCP client. Build `examples/cljs-node/` with
-shadow-cljs, compile, run, verify.
-
----
-
-## Critical architectural decisions (non-negotiable)
-
-These are the rules that keep defport thin, composable, and long-lived.
-See `CLAUDE.md` for the full text and rationale.
-
-1. **Synchronous port handler contract.** Port handlers are
-   `(fn [context] result)`. Never add async primitives to the contract.
-2. **Users bring their own async.** Feature-detect async types, no
-   hard deps on core.async/promesa/manifold.
-3. **Protocol intersection, not union.** MCP/LSP/DAP share JSON-RPC
-   dispatch, cancellation, state, content formatting. Protocol adapters
-   are thin mappings over the shared core.
-4. **Transport manages concurrency.** Stdio is 1-process-1-peer. HTTP
-   concurrency lives in the transport. Dispatch core stays synchronous.
-5. **Server/client asymmetry.** Server is universal and fully
-   cross-platform. Client features (spawning external servers) don't
-   ship — they belong in user code.
-6. **No mechanical reader conditionals.** Use `platform/*` helpers.
-
-## Library philosophy
-
-**defport is a LOW-LEVEL LIBRARY like Ring or Lacinia.**
-
-Defport provides:
-- MCP/LSP/DAP protocol adapters
-- Transport implementations
-- `ProtocolClient` protocol contract (but no implementation)
-- tap> events and datafy/nav for observability
-- `Unwrappable` extension point for user async
-
-Defport does NOT provide:
-- Auth middleware
-- Metrics collectors
-- HTTP middleware stacks
-- Lifecycle management (Component/Integrant/Mount)
-- Subprocess clients (users implement `ProtocolClient` themselves)
-- A specific concurrency model
-
-**Rationale:** Applications already have auth, metrics, database pools,
-async libraries, and lifecycle management. Defport integrates with YOUR
-infrastructure, not the other way around. It's Ring for protocols.
+| Test | Peer | Direction |
+|---|---|---|
+| `test-mcp-real-server-everything` | `@modelcontextprotocol/server-everything` | defport client → vendor server |
+| `test-lsp-real-rust-analyzer` | rust-analyzer 1.94.1 | defport client → vendor server |
+| `test-dap-real-debugpy` | debugpy 1.8.20 | defport client → vendor server |
+| `test-cdp-real-chromium` | Chromium 142 headless | defport client → vendor server |
+| `test-ros2-fake-rosbridge-round-trip` | Python `websockets` fake | defport client → stdlib peer |
+| `test-python-mcp-client-vs-defport-server` | Python stdlib | external client → defport server |
+| `test-python-lsp-client-vs-defport-server` | Python stdlib | external client → defport server |
+| `test-python-dap-client-vs-defport-server` | Python stdlib | external client → defport server |
 
 ---
 
-## Test status
+## What changed from 0.2.0
 
-```
-clojure -M:kaocha
-304 tests, 1856 assertions, 0 failures.
-```
-
-Key test files:
-
-```
-test/defport/protocols/
-  mcp_test.clj             — core MCP adapter tests + 5 unwrap tests
-  mcp_batch_test.clj       — concurrent batch processing
-  mcp_completions_test.clj — argument completion
-  mcp_elicitation_test.clj — form + URL elicitation modes
-  mcp_roots_test.clj       — client filesystem roots
-  mcp_sampling_test.clj    — server-initiated LLM requests
-  dap_test.cljc            — DAP protocol adapter (partial)
-
-test/defport/integration/
-  elicitation_integration_test.clj
-  completions_integration_test.clj
-  prompts_integration_test.clj
-  resources_integration_test.clj
-  roots_integration_test.clj
-  sampling_integration_test.clj
-  tools_integration_test.clj
-
-test/defport/testing/
-  client_test.clj    — HTTP test client integration
-  server_test.clj    — test server harness
-  compliance_test.clj — MCP spec compliance validation
-```
+- Tests 374 → 379 (+5)
+- Assertions 2,086 → 2,103 (+17)
+- New namespaces: `defport.bsp.*`, `defport.cdp.*`, `defport.ros2.*`, `defport.transports.websocket-client`
+- New resource files: `resources/bsp.smithy`, `resources/cdp-browser-protocol.json`, `resources/cdp-js-protocol.json`
+- New example files: `examples/industrial_mcp.clj`, `examples/robotics_mcp.clj`
+- ROADMAP rewritten with Campaign 6 and new direction entries
+- README rewritten with BSP / CDP / rosbridge quick-starts
+- CHANGELOG got a [0.3.0] entry
+- Two decisions reversed from earlier phases:
+  1. **CDP** — was "out of scope" in the 0.1 roadmap, now shipped
+     because it's the closest substrate fit after LSP/DAP/MCP.
+  2. **Subprocess client modes** — deleted in Phase 7, restored in
+     Phase 8 as pluggable reference transports. The original
+     deletion was right for that scope; the rebuild honors CLAUDE.md
+     principle 5's pluggable-primitives form.
 
 ---
 
-## How to onboard a new contributor
+## Open directions (see ROADMAP.md for detail)
 
-1. Read `CLAUDE.md` — six non-negotiable design principles
-2. Read `docs/ARCHITECTURE.md` — concurrency model, protocol intersection,
-   design rationale
-3. Run `clojure -M:kaocha` and see 304 tests pass
-4. Pick a Phase 8 item from `ROADMAP.md` or find a TODO in the source
-5. Before adding code: make sure your change doesn't violate any of
-   the six design principles. When in doubt, ask.
+1. **Ignition gateway module** — Inductive Automation's Ignition runs
+   on the JVM and uses Eclipse Milo internally. A Clojure-compiled
+   JAR dropped into Ignition's module directory could expose plant-
+   floor tags as MCP tools. Not a defport feature — belongs in its
+   own repo (`defport-ignition`). Flagged in memory as a
+   commercially interesting lead.
+2. **BSP real-server integration test** — CI would install Bloop or
+   Mill and exercise the client against a throwaway project.
+3. **rosbridge real-server integration test** — CI would install
+   `ros-humble-rosbridge-server`.
+4. **CDP ergonomic gap** — only ~20 of 664 commands have typed
+   helpers. Consider a `defcdp` macro that auto-generates helpers
+   per domain from the spec.
+5. **Publish to Clojars** as `typmk/defport {:mvn/version "0.3.0"}`.
+6. **Native DDS / rclcpp / OPC UA / Modbus clients** — still out of
+   scope as defport features. The MCP-wraps-JVM-library pattern is
+   the contribution to that space.
 
 ---
 
-*Last Updated: 2026-04-12 (Phase 7 complete)*
+## Phase 7 history (preserved for context)
+
+Phase 7 shipped 2026-04-12 at 304 tests / 1,856 assertions. It
+scoped defport honestly to server-adapter role, cut ~1,600 lines
+of speculative client-mode code, concentrated reader conditionals
+in `defport.util.platform` (225 → 74, −67%), and fixed a
+long-standing `register-port!` shadowing bug. Phase 8 and Campaign
+6 built on top of that cleaned-up substrate to add the client-role
+story back as a pluggable reference transport, plus BSP/CDP/
+rosbridge/industrial examples. See the ROADMAP decision log for
+the full arc.

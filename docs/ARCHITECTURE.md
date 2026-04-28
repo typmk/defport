@@ -14,7 +14,7 @@ Like Ring for HTTP or Lacinia for GraphQL, defport provides protocol abstraction
 
 | We Provide | We Do NOT Provide |
 |------------|-------------------|
-| Protocol adapters (MCP, LSP*, DAP*) | Auth middleware |
+| Protocol adapters (MCP, LSP, DAP, BSP) + clients (MCP, LSP, DAP, BSP, CDP, rosbridge) | Auth middleware |
 | Transport layer (stdio, HTTP) | Metrics collectors |
 | Port registry system | HTTP middleware stacks |
 | Progress & cancellation | Component/Integrant adapters |
@@ -599,7 +599,7 @@ defport is 20% fewer lines for equivalent functionality, with more flexibility.
 |--------|---------|-------|
 | **Philosophy** | Library | Framework |
 | **Language** | Clojure (.cljc) | Java |
-| **Multi-protocol** | ✅ MCP, LSP*, DAP* | ❌ LSP only |
+| **Multi-protocol** | ✅ MCP, LSP, DAP, BSP, CDP, rosbridge | ❌ LSP only |
 | **Hot reload** | ✅ Yes | ❌ No |
 | **Data-driven** | ✅ EDN, Malli | ❌ Annotations |
 
@@ -607,10 +607,11 @@ defport is 20% fewer lines for equivalent functionality, with more flexibility.
 
 | Aspect | defport | clojure-mcp |
 |--------|---------|-------------|
-| **Focus** | Multi-protocol library | MCP REPL integration |
-| **Use case** | Build MCP servers | Clojure REPL via MCP |
-| **Multi-protocol** | ✅ Planned | ❌ MCP only |
+| **Focus** | Multi-protocol substrate | MCP REPL integration |
+| **Use case** | Build MCP/LSP/DAP/BSP/CDP/rosbridge servers and clients | Clojure REPL via MCP |
+| **Multi-protocol** | ✅ Six protocols shipped | ❌ MCP only |
 | **Server building** | ✅ Primary use | ❌ Not designed for |
+| **Client building** | ✅ Pluggable ClientTransport | ❌ Not designed for |
 
 ---
 

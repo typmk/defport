@@ -5,6 +5,129 @@ All notable changes to defport will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-15
+
+### Campaign 6 — Protocol family expansion
+
+**Status:** Complete
+**Tests:** 379 kaocha / 2,103 assertions / 0 failures; 194 CLJS
+          smoke / 584 assertions / 0 failures; **8 real-external
+          integration tests passing**, including:
+          - MCP client ↔ `@modelcontextprotocol/server-everything`
+          - LSP client ↔ rust-analyzer 1.94.1
+          - DAP client ↔ debugpy 1.8.20
+          - **CDP client ↔ real headless Chromium 142**
+          - ROS 2 client ↔ fake rosbridge (Python `websockets`)
+          - MCP/LSP/DAP servers ↔ Python stdlib external clients
+
+Two new first-class protocols, one new transport, one bridge
+client, two industrial example files. Every piece validated
+against a real external counterpart (or, for rosbridge, a
+stdlib-based fake) over a real subprocess or real WebSocket.
+
+#### Spec coverage (programmatically verified on every test run)
+
+| Protocol                  | Official             | defport              | Coverage |
+|---------------------------|----------------------|----------------------|----------|
+| LSP 3.17 methods          |    78                |    80                |  100.0%  |
+| DAP 1.65 commands         |    45                |    45                |  100.0%  |
+| DAP 1.65 events           |    17                |    17                |  100.0%  |
+| MCP 2025-11-25 methods    |    31                |    31                |  100.0%  |
+| **BSP 2.2 methods**       |    27                |    27                |  100.0%  |
+| **CDP 1.3 commands**      |   664 (upstream JSON)|   664 (auto-derived) |  100.0%  |
+| **CDP 1.3 events**        |   237                |   237                |  100.0%  |
+| **rosbridge v2.0 ops**    |    20                |    20                |  100.0%  |
+
+#### New protocols
+
+- **BSP 2.2** — Build Server Protocol. `defport.bsp.{spec,client}`
+  + subprocess transport. 27 methods extracted from the upstream
+  Smithy spec at
+  `build-server-protocol/build-server-protocol/spec/src/main/resources/META-INF/smithy/bsp/bsp.smithy`,
+  committed as `resources/bsp.smithy`. Full parity with LSP/DAP —
+  same JSON-RPC + Content-Length wire, same sugar macros, same
+  subprocess transport, same spec-driven drift check. 13 typed
+  client helpers (workspace-build-targets, build-target-compile,
+  test, run, clean, sources, dependency-sources/modules, etc.).
+
+- **CDP 1.3** — Chrome DevTools Protocol. Spec registry **generated
+  at load time from upstream JSON** (`browser_protocol.json` +
+  `js_protocol.json`, both fetched from
+  `ChromeDevTools/devtools-protocol` and committed to `resources/`).
+  901 entries = 664 commands + 237 events across 56 domains.
+  Too large to hand-maintain; the data-driven approach means zero
+  drift risk — upstream changes propagate on `npm update` of the
+  resource files. Client core with 20 typed helpers for the common
+  commands (Browser.getVersion, Target.createTarget,
+  Page.navigate/reload/captureScreenshot/printToPDF, Runtime.evaluate,
+  DOM.getDocument/querySelector/getOuterHTML, Network.enable/setUAOverride,
+  Input.dispatchMouseEvent/dispatchKeyEvent). The other 644
+  commands are reachable via `(cdp/request! client :Domain/command params)`.
+
+#### New transport
+
+- **WebSocket client transport** — `defport.transports.websocket-client`.
+  Generic JSON-over-WebSocket ClientTransport shared between CDP
+  and rosbridge. JVM implementation uses `java.net.http.WebSocket`
+  (JDK 11+, zero new deps). CLJS implementation uses the native
+  `WebSocket` global (Node 22+ and all browsers) or falls back to
+  the `ws` npm package. A small `WebsocketClientTransport` protocol
+  (`ws-start!`/`ws-send!`/`ws-recv!`/`ws-stop!`/`ws-alive?`) lets
+  per-protocol client namespaces wrap it with their own type-
+  discriminating `ClientTransport` impl.
+
+#### New bridge client
+
+- **rosbridge v2.0** — `defport.ros2.{spec,client}` + WebSocket
+  transport. Speaks the rosbridge_suite JSON-over-WebSocket
+  protocol, letting any Clojure/ClojureScript process talk to ROS 2
+  topics, services, and actions without rclcpp, rclpy, DDS, or
+  FFI. 20 ops covering lifecycle, topics (advertise/publish/
+  subscribe), services (call/response), actions (send-goal/cancel/
+  feedback/result). Closes a real Clojure ↔ ROS 2 gap — the
+  ecosystem has three abandoned ROS 1 libraries and zero ROS 2
+  bindings.
+
+#### New examples
+
+- **`examples/industrial_mcp.clj`** — MCP server exposing a mock
+  SCADA backend (holding registers in an atom). Six deftools:
+  read-holding-register, write-holding-register, read-opcua-tag,
+  browse-opcua-namespace, trip-emergency-stop, list-active-alarms.
+  Demonstrates the pattern for wrapping OPC UA / Modbus / DNP3 /
+  IEC 61850 backends (via Eclipse Milo, j2mod, OpenDNP3) as MCP
+  tools for AI assistants. Validated end-to-end via the existing
+  Python external MCP client — Python client spawns the server,
+  enumerates tools, calls one.
+
+- **`examples/robotics_mcp.clj`** — MCP server bridging to a live
+  ROS 2 robot via `defport.ros2.client`. Four tools (list-topics,
+  call-service, publish-twist, send-nav-goal) let an AI client
+  drive the robot without touching ROS APIs. Uses `rosbridge_server`
+  on the robot side (default `ws://localhost:9090`).
+
+#### Decisions reversed from earlier phases
+
+Two items moved from "out of scope" to "shipped":
+
+1. **~~CDP out of scope~~ → shipped.** The earlier reasoning ("mature
+   ecosystem exists") was true but missed that CDP is structurally
+   the closest fit for defport's substrate of anything in the non-
+   LSP family. Shipped in Campaign 6 with real Chromium 142 integration.
+2. **~~Subprocess client modes removed~~ → shipped as optional
+   reference transports.** Phase 7 removed 1,600 lines of
+   speculative client code. Phase 8 rebuilt them inside the
+   substrate pattern — pluggable `ClientTransport` protocol,
+   reference `subprocess.cljc` per protocol. The original removal
+   was right for its scope; the rebuild honors CLAUDE.md principle
+   5's pluggable-primitives form.
+
+#### Dependencies
+
+Zero new defport dependencies. WebSocket transport uses the
+JDK-built-in `java.net.http.WebSocket`. CDP and rosbridge JSON
+parsing goes through the existing cheshire dependency.
+
 ## [0.2.0] - 2026-04-15
 
 ### Phase 8 — Substrate campaign

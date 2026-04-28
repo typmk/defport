@@ -2,6 +2,12 @@
 
 This document captures the evolution of defport from concept to production-ready library, including key design decisions, strategic pivots, and lessons learned.
 
+> **Note (2026-04-15, v0.3.0):** This is a historical record. Two decisions below were reversed in later phases — see CHANGELOG [0.3.0] and ROADMAP decision log:
+> - "CDP out of scope" → reversed; CDP shipped in Campaign 6 as `defport.cdp.*` with 901 spec entries auto-derived from upstream JSON.
+> - Phase 7 subprocess-client deletion → reversed in Phase 8 as pluggable reference transports under `defport.*.client.transports.*`.
+>
+> Current status: Phase 8 + Campaign 6 complete, 379 kaocha tests, BSP/CDP/rosbridge shipped alongside MCP/LSP/DAP.
+
 ---
 
 ## Timeline Overview

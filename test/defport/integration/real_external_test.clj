@@ -33,6 +33,8 @@
             [defport.lsp.client.transports.subprocess :as lsp-sub]
             [defport.dap.client :as dap]
             [defport.dap.client.transports.subprocess :as dap-sub]
+            [defport.bsp.client :as bsp]
+            [defport.bsp.client.transports.subprocess :as bsp-sub]
             [defport.cdp.client :as cdp]
             [defport.cdp.client.transports.websocket :as cdp-ws]
             [defport.ros2.client :as ros2]
@@ -394,6 +396,67 @@
             (str "external Python DAP client failed\n"
                  "stderr:\n" (:err r)
                  "\nstdout:\n" (:out r)))))))
+
+;; ============================================================================
+;; BSP: defport client → scala-cli bsp
+;; ============================================================================
+;;
+;; scala-cli is the cleanest single-binary BSP server available on a
+;; dev machine — one install, no workspace pre-configuration. `scala-cli
+;; bsp` spawns a BSP 2.2 server on stdio. If defport's BSP client can
+;; handshake with it and list buildTargets, the wire format is right.
+
+(defn- write-minimal-scala-project!
+  "Create a tiny scala-cli project (single .scala file with using
+   directives). Returns the absolute path."
+  []
+  (let [dir (java.io.File/createTempFile "defport-bsp-test" "")]
+    (.delete dir)
+    (.mkdirs dir)
+    (spit (io/file dir "hello.scala")
+          "//> using scala 3.3.1\n@main def hello(): Unit = println(\"hello\")\n")
+    (.getAbsolutePath dir)))
+
+(deftest test-bsp-real-scala-cli
+  (testing "defport BSP client can connect to scala-cli bsp"
+    (if-not (available? "scala-cli")
+      (skip "scala-cli not installed")
+      (let [project-dir (write-minimal-scala-project!)
+            tx     (bsp-sub/transport ["scala-cli" "bsp" "--workspace" project-dir "."])
+            client (bsp/create-client tx)
+            done   (promise)]
+        (try
+          (bsp/connect-async!
+            client
+            {:display-name "defport-integration-test"
+             :version      "0.1.0"
+             :root-uri     (str "file://" project-dir)
+             :capabilities {:languageIds ["scala"]}}
+            (fn [c err] (deliver done [c err])))
+
+          ;; scala-cli cold start can pull the Scala toolchain. 180s is generous.
+          (let [[c err] (deref done 180000 [::timeout nil])]
+            (is (not= ::timeout c)
+                "BSP initialize handshake did not complete in 180s")
+            (is (nil? err) (str "initialize error: " err))
+            (when c
+              (is (true? (:initialized? @(:state* c))))
+              (let [caps (:server-capabilities @(:state* c))]
+                (is (map? caps) "scala-cli should return a capability map"))
+
+              ;; workspace/buildTargets is the canonical BSP read.
+              (let [[body err2] (bsp/await (bsp/workspace-build-targets c))]
+                (is (nil? err2) (str "workspace/buildTargets error: " err2))
+                (is (sequential? (:targets body))
+                    "workspace/buildTargets should return a :targets seq"))))
+
+          (finally
+            (bsp/disconnect! client)
+            (letfn [(rm-rf [^java.io.File f]
+                      (when (.isDirectory f)
+                        (doseq [c (.listFiles f)] (rm-rf c)))
+                      (.delete f))]
+              (rm-rf (io/file project-dir)))))))))
 
 (deftest test-dap-real-debugpy
   (testing "defport DAP client can connect to debugpy.adapter"

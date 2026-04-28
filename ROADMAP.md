@@ -1,360 +1,279 @@
 # Defport Roadmap
 
-**Version:** 0.7.0-SNAPSHOT → 1.0.0
-**Status:** Phase 7 Complete | 304 tests, 1,856 assertions, 0 failures
+**Version:** 0.3.0 (2026-04-15)
+**Status:** Phase 8 + Campaign 6 complete | 379 kaocha tests, 2103 assertions, 0 failures
+**Spec coverage:** MCP · LSP · DAP · BSP · CDP · rosbridge — all 100%, drift-checked in CI
 
 ---
 
-## Completed Phases
+## Completed phases
 
-### Phase 1: Core Infrastructure ✅
+### Phase 1 — Core infrastructure ✅
+Core protocols (Port, Transport, ProtocolAdapter, PortRegistry).
+Registry implementations (EDN, Function, Hybrid). Transports
+(stdio, HTTP). Platform portability (`.cljc` for JVM + Node).
 
-- Core protocols (Port, Transport, ProtocolAdapter, PortRegistry)
-- Registry implementations (EDN, Function, Hybrid)
-- Transport implementations (stdio, HTTP)
-- Platform portability (`.cljc` for JVM + Node.js)
+### Phase 2 — MCP implementation ✅
+MCP 2025-11-25 protocol adapter. Progressive-disclosure DSL
+(`deftool`, `defprompt`, `defresource`). Resource subscriptions,
+change notifications, server-initiated sampling/elicitation/roots.
 
-### Phase 2: MCP Implementation ✅
+### Phase 3 — Advanced MCP features ✅
+Elicitation (form + URL modes). Completions (argument autocomplete).
+Per-session log-level control. Schema builder API.
 
-- MCP 2025-11-25 protocol adapter
-- Progressive disclosure DSL (`deftool`, `defprompt`, `defresource`, `run!`)
-- 20% fewer lines than Python's FastMCP
-- Resource subscriptions and change notifications
-- Server-initiated sampling, elicitation, roots
+### Phase 4 — Performance ✅
+Concurrent batch processing (sequential, pmap, futures, core-async
+strategies). 100% backward compatible — sequential is the default.
 
-### Phase 3: Advanced MCP Features ✅
+### Phase 5 — Integration & documentation ✅
+`docs/INTEGRATION.md`, `docs/ARCHITECTURE.md`. `defport.inspect`
+(datafy/nav). `tap>` events throughout the MCP adapter.
 
-- Three schema definition styles (Malli, plain, fluent)
-- Builder API
-- Elicitation (form and URL modes, MCP 2025-11-25)
-- Completions (argument autocomplete)
-- Per-session log level control
+### Phase 6 — State refactor ✅
+Eliminated 8 global `defonce` atoms. Per-adapter instance state
+via a single atom holding an immutable map.
 
-### Phase 4: Performance ✅
+### Phase 7 — Cross-platform restructure ✅
+Reader conditionals 225 → 74 (−67%). 1,600 lines of speculative
+client-mode code removed (later restored as pluggable reference
+transports in Phase 8, with the substrate to back them). Synchronous
+handler contract codified (Ring-style). Platform abstraction layer
+(`defport.util.platform`) grown with helpers for error-message,
+try-any, process-id, UTF-8 byte length.
 
-- Concurrent batch processing (four strategies: sequential, pmap, futures, core-async)
-- 5–10x speedup for I/O-bound operations
-- 100% backward compatible (sequential by default)
+### Phase 8 — Substrate campaign ✅ (2026-04-14 → 2026-04-15)
+**The library became a substrate, not just a server adapter.**
 
-### Phase 5: Integration & Documentation ✅
+- Plain-data spec registries for every protocol: `defport.{mcp,lsp,dap}.spec`
+- Client cores with pluggable `ClientTransport`: `defport.{mcp,lsp,dap}.client`
+- Reference subprocess transports (JVM + Node): every protocol
+- `sugar/run!` now works: one line starts a protocol-correct
+  server (JSON-lines for MCP per the 2025-11-25 spec; Content-
+  Length for LSP + DAP), auto-registers lifecycle handlers,
+  threads the registry through dispatch
+- Auto-derived LSP capabilities from registered ports
+- Unified client `connect!` opts across protocols
+- Cross-platform `await` (JVM blocks, CLJS returns `js/Promise`)
+- Spec drift check runs in kaocha against upstream schemas
+- 11 real interop bugs caught by writing runnable examples and
+  integration tests — zero caught by unit tests
 
-- `docs/INTEGRATION.md` — Component, Integrant, Ring, Pedestal patterns
-- `docs/ARCHITECTURE.md` — design rationale
-- `defport.inspect` — datafy/nav for REPL introspection
-- tap> events throughout MCP adapter
+Tagged `v0.2.0`.
 
-### Phase 6: State Refactor ✅
+### Campaign 6 — Protocol family expansion ✅ (2026-04-15)
+**Two new first-class protocols, one new transport, one bridge
+client, two industrial example files.**
 
-**Eliminated 8 global `defonce` atoms in the MCP adapter.** Each
-`McpAdapter` now owns its own state via a `:state*` field holding a
-single atom of an immutable map, threaded into handler context.
-Multi-server-per-process works correctly.
+- **BSP 2.2** — Build Server Protocol. 27 methods extracted from
+  upstream Smithy. `defport.bsp.spec` + client + subprocess
+  transport. Full parity with LSP/DAP.
+- **WebSocket transport** — JVM `java.net.http.WebSocket` (JDK 11+,
+  zero new deps) + Node native WebSocket. Shared between CDP and
+  rosbridge. Generic `WebsocketClientTransport` protocol, thin
+  per-client wrappers for type discrimination.
+- **CDP 1.3** — Chrome DevTools Protocol. 664 commands + 237 events
+  across 56 domains, data-driven at load time from upstream
+  `browser_protocol.json` + `js_protocol.json` — zero drift risk.
+  Client core + 20 typed helpers for the common commands. **Real
+  headless Chromium integration test**: `Runtime.evaluate("1+2+3")`
+  returns 6 over a real WebSocket against Chromium 142.
+- **rosbridge v2.0 client** — Clojure ↔ ROS 2 without needing
+  rclcpp/rclpy/DDS. `defport.ros2.spec` (20 ops), client core,
+  typed helpers (advertise/publish/subscribe/call-service/
+  send-action-goal). Integration test against a Python fake
+  rosbridge server asserts subscribe+echo, call-service correlation
+  by id, send-action-goal with feedback + result.
+- **`examples/industrial_mcp.clj`** — 6 deftools over a mock
+  SCADA backend. The canonical pattern for wrapping OPC UA /
+  Modbus / DNP3 / IEC 61850 backends as MCP tools for AI
+  assistants. Real JVM library (Eclipse Milo, j2mod, OpenDNP3)
+  plugs in behind the backend atom.
+- **`examples/robotics_mcp.clj`** — MCP server bridging to a live
+  ROS 2 robot via `defport.ros2.client`. Four tools (list-topics,
+  call-service, publish-twist, send-nav-goal) demonstrate the
+  AI-to-robot pattern end-to-end.
 
-- `create-protocol-state` creates fresh state
-- `active-operations` flattened from nested `(atom false)` cancellation
-  flags to `:active-operations` / `:cancelled-operations` sets
-- Client-side state (3 globals) consolidated similarly
-- `core.cljc` `register-port!` shadowing bug fixed
-  (`register-global-port!` is the new name for the global-registry
-  convenience function)
-
-### Phase 7: Cross-Platform Restructure ✅
-
-**Scoped defport honestly to its server-adapter role.**
-
-- **Reader conditionals 225 → 74 (−67%)**, whole-def structural
-  conditionals 92 → 8 (−91%).
-- **Removed ~1,600 lines of unused speculative code** — subprocess
-  client modules (`defport.mcp-client`, `dap-client`, `lsp-client`),
-  `McpClient` record + 13 `client-*` functions, `create-server` /
-  `start!` / `stop!` / `create-client` stubs.
-- **Concurrency model codified**: synchronous handler contract
-  (Ring-style), users bring their own async via the `Unwrappable`
-  protocol (feature-detects `IDeref`/manifold/etc., no hard deps).
-- **Node stdio transport** verified cross-platform — core server
-  path compiles clean on CLJS.
-- **Platform abstraction layer (`defport.util.platform`)** grown with
-  `error-message`, `error-type`, `try-any` macro, `unwrap`, `process-id`,
-  `utf8-byte-length`.
-- **Namespace drift fixed**: `defport.protocols.mcp` → `defport.mcp`
-  propagated across 36 files that were broken since commit `2d7918e`.
-- **Compliance validator** no longer recurses into user-defined JSON
-  Schema (tool schemas can use snake_case without errors).
-- **Metadata forwarding**: `handle-tools-call` now preserves
-  `:metadata` from handler results.
-- **`:listChanged true`** now advertised for tools/prompts/resources
-  since the adapter supports notifications.
+Tagged `v0.3.0`.
 
 ---
 
-## Current Metrics
+## Current metrics (2026-04-15)
 
 | Metric | Value |
-|--------|-------|
-| MCP Spec Compliance | 100% (2025-11-25) |
-| Tests | 304 |
-| Assertions | 1,856 |
-| Pass Rate | 100% |
-| Core library CLJS compile | Clean |
-| Reader conditionals | 74 (−67% from pre-Phase-7 baseline) |
-| Lines of code | ~9,500 (−1,600 from Phase 6 baseline) |
-| DX vs FastMCP | 20% fewer lines |
+|---|---|
+| Tests (kaocha) | **379** (was 304 at start of Phase 8) |
+| Assertions | **2,103** |
+| Pass rate | 100% |
+| CLJS smoke (via defnet) | 194 tests / 584 assertions, 0 failures |
+| Real-external integration tests | 8 (MCP × server-everything, LSP × rust-analyzer, DAP × debugpy, CDP × Chromium 142, ROS 2 × fake-rosbridge, MCP/LSP/DAP servers × Python stdlib clients) |
+| Protocols at 100% spec coverage | MCP, LSP, DAP, BSP, CDP, rosbridge |
+| Reader conditionals | 74 (post-Phase-7 baseline), 0 added in Phase 8+6 |
+| Real interop bugs caught by validation work | 11 |
 
 ---
 
-## Phase 8: LSP/DAP Server Hardening 🔮
+## Directions under consideration
 
-**Priority:** Medium. The MCP story is solid. LSP and DAP server adapters
-exist but were audited 2026-04-12 and found at substantially different
-readiness levels. See "Audit findings" below for coverage tables.
+### Direction A — Real-world validation beyond defnet
 
-### Audit findings (2026-04-12)
+Everything in v0.3.0 has been validated against either a real
+external counterpart or a different-language stdlib client. Defnet
+remains the canonical consumer but the substrate is now
+independently useful. Opportunities:
 
-**LSP adapter (`defport/lsp.cljc`, 1499 LOC):** ~15% implemented, ~37%
-stubbed (declared, no server handler), ~48% missing. Zero LSP tests exist.
+1. **Ignition gateway module** — Inductive Automation's Ignition
+   runs on the JVM and uses Eclipse Milo (the canonical open-source
+   Java OPC UA stack) internally. A Clojure-compiled JAR could drop
+   into Ignition's module directory and expose plant-floor tags as
+   MCP tools — turning Ignition into an AI-addressable endpoint
+   with ~200 LOC of Clojure. Nobody has done this publicly. Scope:
+   separate library (`defport-ignition`), not a defport feature.
+2. **BSP against real servers** — integration tests currently pass
+   against defport's own stubs. CI should install either Bloop or
+   Mill and run the real client against a throwaway project.
+3. **rosbridge against real ROS 2** — integration test uses a
+   Python fake. CI could install `ros-humble-rosbridge-server` and
+   exercise a real topic/service/action round-trip.
 
-- Works: `initialize`, `initialized`, `shutdown`, `exit`,
-  `didOpen/didChange/didClose`, `ProtocolAdapter` contract, port metadata
-  routing via `:metadata {:lsp {:method ...}}`
-- Stubbed (declared, no server handler): `hover`, `definition`,
-  `references`, `documentSymbol`, `completion`, `codeAction`, `rename`,
-  `formatting`, `workspace/symbol`, `$/cancelRequest`, `$/progress`,
-  `didSave`. Client-side helpers exist but only format outgoing params;
-  server never responds.
-- Missing entirely: `typeDefinition`, `implementation`, `signatureHelp`,
-  `prepareRename`, pull `diagnostic`, `semanticTokens`, `foldingRange`,
-  `workspace/applyEdit`, `executeCommand`, `window/*`
-- **Load-bearing gap**: LSP's state atom is `{:initialized false}` only.
-  MCP's has 140+ lines of cancellation/progress/subscription machinery.
-  `$/cancelRequest` and `$/progress` cannot work until that infrastructure
-  is ported across.
+### Direction B — Fill the CDP ergonomic gap
 
-**DAP adapter (`defport/dap.cljc`, 943 LOC):** 13 implemented, 6 partial,
-28 stubbed, 5 missing events. 442 LOC of isolation tests exist.
+CDP's spec covers all 664 commands and 237 events automatically
+(data-driven from upstream JSON), but only ~20 have typed helpers.
+The other 644 are reachable via `(cdp/request! client :Domain/command params)`
+but that's less ergonomic than `(cdp/page-navigate client url)`.
+Filling this out is mechanical — one helper per command, driven
+by the spec at macroexpansion time. Possible work: a `defcdp`
+macro that auto-generates helpers for all commands in a named
+domain, so consumers write `(defcdp :Page)` and get
+`(cdp.page/navigate ...)` / `(cdp.page/reload ...)` / etc. for free.
 
-- Works: full lifecycle (`initialize`/`launch`/`attach`/
-  `configurationDone`/`disconnect`/`terminate`), `setBreakpoints` with
-  state storage and verified status, `continue`, `scopes`, `variables`,
-  `evaluate` with port-registry integration, `completions`, message
-  codecs, emitted events (`stopped`, `continued`, `terminated`, `output`,
-  `breakpoint`)
-- Hardcoded stubs: `threads` returns one-frame placeholder, `stackTrace`
-  returns empty, `source`/`loadedSources`/`modules` return empty
-- Unsupported: `next`, `stepIn`, `stepOut`, `stepBack`, `reverseContinue`,
-  `pause`, `goto`, `setVariable`, `setExpression`
-- Missing events: `exited`, `thread`, `module`, `process`
-- Backend flags (`:nrepl`, `:flowstorm`, `:jdi`) affect capability
-  reporting only; no backend integration code exists
-- **Scope clarification**: the stepping/stackTrace/threads stubs only
-  become real when a debug backend drives them, and **backends live in
-  consumer code, not defport**. The defport-side DAP adapter is ~4 days
-  from honest done (stackTrace plumbing, missing events, polish).
+### Direction C — Industrial / robotics ecosystem work
 
-### 8.1 LSP core-features pass (~1 week)
+The Clojure ecosystem is a virgin territory for industrial and
+robotics protocols:
 
-- Port cancellation/progress state machinery from MCP (prerequisite for
-  `$/cancelRequest` and `$/progress`)
-- Implement default server handlers for `hover`, `definition`,
-  `references`, `documentSymbol`, `rename` that route through port
-  metadata
-- Add `didSave` handling
-- First real LSP test file — adapter in isolation, no real editor
-  required. Integration tests against a real editor can come later in
-  user code.
+- **Three abandoned ROS 1 Clojure bindings** (asimov, clojure-ros,
+  rosclj). Zero ROS 2 / DDS.
+- **Zero native Clojure Modbus / OPC UA / DNP3 / IEC 61850 libraries.**
+- **JVM interop is the pragmatic path**: Eclipse Milo (OPC UA),
+  j2mod (Modbus TCP/RTU), OpenDNP3 (via JNI), Eclipse Cyclone DDS
+  Java (ROS 2). Each of these is tractable as a thin Clojure
+  wrapper.
 
-### 8.2 DAP adapter honest-done pass (~4 days)
+Defport's contribution to this space is not protocol adapters —
+the wire formats are binary, often real-time, often hardware-routed,
+and don't fit defport's text-based JSON-RPC substrate. Defport's
+contribution is **the `deftool`-over-JVM-interop pattern**: wrap
+any of these Java libraries in a plain Clojure function, expose
+as an MCP tool, let an AI assistant query the plant floor. The
+`industrial_mcp.clj` and `robotics_mcp.clj` examples demonstrate
+the pattern; production work would build:
 
-- Port cancellation/progress state pattern from MCP
-- `stackTrace` plumbing — proper frame structure, source/line/column,
-  so consumer-side backends can fill it in
-- Emit missing events: `exited`, `thread`, `module`, `process`
-- Additional tests for the new plumbing
+1. **`defport-opcua`** (separate lib) — thin Clojure wrapper around
+   Eclipse Milo client, 50–100 LOC. Usable standalone or as an
+   MCP tool backend.
+2. **`defport-modbus`** — thin wrapper around j2mod, similar shape.
+3. **`defport-ros2`** (evolution of `defport.ros2`) — eventually
+   add direct DDS support via Cyclone DDS Java (~weeks of work,
+   probably not worth it while rosbridge is in scope).
 
-**Not in scope for defport**: nREPL/FlowStorm/JDI backend integration.
-That's 2+ weeks of consumer-side work and belongs wherever the consumer
-(defnet) spawns or attaches to debuggers.
+These are separate libraries, not defport phases — defport stays
+the protocol substrate, these become the industrial-integration
+layer that sits on top of it.
 
-### 8.3 Multi-adapter composition example
+### Direction D — Node story deepening
 
-The Port/Transport/ProtocolAdapter/PortRegistry abstractions already
-compose: a consumer instantiates multiple adapters against a single
-registry and runs them together. **This is a pattern, not a feature** —
-defport does not ship a "cross-protocol router" or a capability layer.
-The work here is to *document and demonstrate* the composition, not
-to build new infrastructure.
+The core MCP/LSP/DAP/BSP/CDP/rosbridge paths all compile clean on
+Node and have smoke tests via `defnet/defport_smoke_test.cljs`, but
+only the MCP/LSP/DAP round-trips have been exercised end-to-end on
+Node. CDP and rosbridge on Node are structurally the same but
+haven't been validated. Follow-up:
 
-- `examples/multi-adapter/` — minimal example showing one registry
-  feeding MCP + LSP + DAP adapters in one process, each on its own
-  transport, each independently runnable
-- Document the per-protocol metadata pattern
-  (`:metadata {:protocols #{:mcp :lsp} :mcp {...} :lsp {...}}`) as
-  the contract consumers use when a single port should surface
-  through multiple protocols with shape translation
-- Verify via defnet (the canonical consumer) that MCP + LSP composition
-  works end-to-end against the same underlying graph. The capability
-  layer, per-protocol exposure metadata, and DAP client/proxy all live
-  in defnet — not in defport.
+- CDP client vs real headless Chromium from a Node process
+- rosbridge client vs the same fake server from Node
+- defnet eventually adopts defport's sugar paths as its primary MCP
+  surface (currently defnet uses the upstream `@modelcontextprotocol/sdk`
+  directly — understandable historical reason, no longer necessary)
 
-### 8.4 Sugar facade consolidation
+### Direction E — Release & distribution
 
-Audit 2026-04-12 confirmed `src/mcp.cljc` (1041 LOC, ns `mcp`),
-`src/lsp.cljc` (614 LOC, ns `lsp`), and `src/dap.cljc` (571 LOC, ns `dap`)
-are pure DSL wrappers over `defport.{mcp,lsp,dap}`, not duplicated
-implementation. Dependency direction is unidirectional
-(sugar → adapter). **Zero test files and zero internal code requires
-the single-segment namespaces** — they exist only for tutorial/README
-ergonomics.
+**Prerequisites:** all of v0.3.0 is ready to publish except the
+artifact plumbing.
 
-Single-segment namespaces cause CLJS warnings and collide with user code
-(`(require '[mcp])`). Consolidation plan:
-
-- Rename `src/mcp.cljc` → `src/defport/mcp_sugar.cljc` (ns
-  `defport.mcp-sugar`), same for LSP and DAP
-- Create `src/defport.cljc` as a root re-export for the README pattern
-  `(:require [defport :as mcp] :refer [deftool])` — this matches how
-  the examples already import things
-- Verify the current state of examples/ and the classpath-resolution of
-  bare `[defport ...]` requires before starting (some examples may be
-  broken today)
-- Run 304 tests green, update CHANGELOG
-
-Estimated cost: ~2 hours. Low risk because the tests don't touch the
-single-segment namespaces.
+1. **Publish to Clojars** as `typmk/defport {:mvn/version "0.3.0"}`
+2. **Codox API reference** site from the (extensive) docstrings
+3. **Tutorial series**: one short doc per protocol, each showing
+   the 15-line server + client pattern
 
 ---
 
-## Revised ordering (post-audit)
+## Success metrics (updated for 0.3.0 → 1.0.0)
 
-The audits re-ordered the critical path. Current sequence:
-
-1. **Verify defport root namespace state** (30 min) — does
-   `src/defport.cljc` exist, what do `(:require [defport ...])`
-   statements in examples/ actually resolve to, what's broken
-2. **Sugar consolidation** (8.4, ~2 h) — rename sugar files, add root
-   re-export, update examples, 304 tests green
-3. **Defport cleanup** (~3 h) — 3 stray catch-type conditionals, stdio
-   transport consolidation/documentation, `examples/multi-adapter/`
-4. **DAP honest-done pass** (8.2, ~4 d) — cancellation/progress state,
-   stackTrace plumbing, missing events
-5. **LSP core-features pass** (8.1, ~1 w) — state port from MCP, default
-   handlers for hover/definition/references/documentSymbol/rename,
-   first real test file
-
-At this point defport ships three composable adapters at honest parity.
-The follow-on work (defnet capability layer, defnet LSP facade, defnet
-DAP client/proxy/recorder) is consumer-side and tracked in defnet's
-roadmap, not here.
+| Metric | 0.3.0 | Target 1.0.0 |
+|---|---:|---:|
+| Protocols with 100% spec coverage | 6 (MCP, LSP, DAP, BSP, CDP, rosbridge) | 6+ (maintain) |
+| Real-external integration tests | 8 | 10+ |
+| Production users | 1 (defnet) | 3+ |
+| GitHub stars | 0 | 50+ |
+| Published to Clojars | no | yes |
+| CDP typed helpers | ~20 of 664 | domain-complete for Page, Runtime, DOM, Network, Target |
 
 ---
 
-## Phase 9: CLJS/Node Story Hardening 🔮
+## Out of scope (explicitly not planned)
 
-**Priority:** Medium. The core MCP server path compiles clean on Node,
-but hasn't been exercised end-to-end with a real client.
+**Updated 2026-04-15.** A few items that used to be out-of-scope
+have been moved into the substrate (subprocess client modes, CDP)
+because the validation-driven work showed they belong here. Items
+still out-of-scope:
 
-### 9.1 End-to-end CLJS MCP server
-
-- `examples/cljs-node/` — a minimal MCP server built with shadow-cljs,
-  compiled to Node, connected to Claude Desktop
-- Documented build process and deployment
-- Validates the synchronous Node stdio transport in production
-
-### 9.2 Node HTTP transport
-
-- The HTTP transport has a `:cljs` branch that's untested
-- Verify it works for multi-client scenarios
-- Document session management patterns (apps need to key state
-  per-client when running as HTTP daemon)
-
-### 9.3 Shadow-cljs build docs
-
-- How to consume defport from a CLJS project
-- How to deploy to AWS Lambda, Cloud Run, or similar serverless
-- Publishing to npm (if we decide this is a goal)
-
----
-
-## Phase 10: Release & Distribution 🔮
-
-**Target:** Q3 2026
-**Prerequisites:** Phases 8–9 complete, or explicit decision to ship
-without them
-
-### 10.1 Publish to Clojars
-
-- Versioning strategy (semantic, follows MCP spec revisions)
-- `pom.xml` / `deps.edn` cleanup
-- Artifact naming
-
-### 10.2 API reference
-
-- Codox for docstring extraction
-- Hosted on a project site
-
-### 10.3 Tutorial series
-
-- "Build an MCP server in 10 lines"
-- "Integrate defport into an existing Ring app"
-- "CLJS + Node MCP servers for serverless deployment"
-
-### 10.4 Release v1.0.0
-
----
-
-## Success Metrics (1.0.0)
-
-| Metric | Current | Target |
-|--------|---------|--------|
-| GitHub Stars | 0 | 100+ |
-| Production Users | 1 (defnet) | 10+ |
-| Protocols | MCP (production) | MCP + LSP + DAP production |
-| Platforms | JVM, Node (core) | JVM, Node full |
-| Tests | 304 | Maintain |
-
----
-
-## Out of Scope (explicitly not planned)
-
-These features are **not planned** and contributions adding them will
-be declined unless the design rationale changes:
-
-- **Subprocess client modes** (spawning external MCP/LSP/DAP servers
-  from defport). This is application concern, not library concern.
-  The `ProtocolClient` protocol exists as a contract; implementations
-  live in user code. (See Phase 7 for context on why.)
 - **Auth middleware** — applications use buddy-auth or their own
-- **Metrics collectors** — applications use Prometheus/iapetos via tap>
-- **CLI framework** — document patterns only
+- **Metrics collectors** — applications use Prometheus/iapetos via `tap>`
+- **CLI framework** — document patterns, don't ship one
 - **Lifecycle management** — applications use Component/Integrant/Mount
-- **CDP (Chrome DevTools Protocol)** — different abstraction level,
-  mature ecosystem already exists
-- **Core async as a required dependency** — users bring their own
+- **core.async as a required dependency** — users bring their own
   async primitive; defport stays synchronous
 - **Session/tenancy management in the HTTP transport** — applications
   layer this via middleware
+- **Direct DDS / Cyclone DDS Java / rclcpp FFI** — wrong scope. ROS 2
+  integration goes through rosbridge (already shipped) for the
+  common case; a hypothetical native DDS binding belongs in a
+  separate library (`defport-ros2-native` or similar).
+- **Native SCADA protocols (Modbus, OPC UA, DNP3, IEC 61850)** —
+  wrong substrate shape. These are binary, often real-time, and
+  live behind JVM-interop libraries (Eclipse Milo, j2mod, OpenDNP3).
+  Defport's contribution is the MCP-wraps-backend pattern, not a
+  native protocol implementation. See `examples/industrial_mcp.clj`
+  and `project_ignition_mcp_opportunity` memory note.
+- **Ignition module packaging** — interesting but belongs in its own
+  repo (`defport-ignition`), not defport itself.
 
 ---
 
-## Decision Log
+## Decision log
 
 | Date | Decision | Rationale |
-|------|----------|-----------|
-| Q4 2024 | Library vs Framework | Applications retain control |
-| Jan 2025 | LSP client approach | 10-100x value vs building servers |
-| Jan 2025 | CDP out of scope | Mature ecosystem exists |
+|---|---|---|
+| Q4 2024 | Library vs framework | Applications retain control |
+| Jan 2025 | LSP client approach | 10–100x value vs building servers |
+| ~~Jan 2025~~ | ~~CDP out of scope~~ | **Reversed 2026-04-15**: CDP is the closest substrate fit in the non-LSP family. Shipped as `defport.cdp` in Campaign 6 with real Chromium integration. |
 | Jan 2025 | No auth/metrics | Applications have these already |
 | 2026-04-12 | State refactor | 8 globals → per-adapter instance state |
-| 2026-04-12 | Subprocess clients removed | Not defport's concern; belongs in user code. Zero tests, zero callers. ~1,600 lines deleted. |
-| 2026-04-12 | Synchronous handler contract codified | Ring-style. Never add async primitives to the contract. Users bring their own async via `Unwrappable`. |
-| 2026-04-12 | Reader conditional concentration | Platform-specific code lives in `defport.util.platform`. Mechanical conditionals eliminated via helpers (`error-message`, `try-any`, `now-ms`, etc.). |
-| 2026-04-12 | Unified use is emergent, not a feature | Defport ships three independent adapters that all consume `PortRegistry`. Composing them is a user-code concern. No cross-protocol router, no capability layer in defport. The bar: individual use simple enough that multi-adapter composition is a trivial consequence. |
-| 2026-04-12 | Capability layer lives in consumer | A capability is a function over a domain model exposed through multiple protocols with shape translation. This belongs in the consumer (defnet), not defport. Defport provides `ProtocolAdapter` + `PortRegistry`; the consumer provides the capabilities and the per-protocol metadata that controls exposure. |
-| 2026-04-12 | DAP client + proxy belongs in defnet | Defnet's use of DAP (observing live debug sessions, projecting runtime events onto the static graph) is the "semantic meets metal" bridge. That implementation lives in defnet, not defport. Defport provides the `ProtocolClient` contract and the DAP protocol mechanics; defnet provides the subprocess spawning, the proxy transport, and the source-to-graph attribution. |
+| 2026-04-12 | ~~Subprocess clients removed~~ | **Revisited**: Phase 8 restored them as *pluggable reference transports* behind `ClientTransport`. The original removal was right for that scope; bringing them back with the substrate pattern honors CLAUDE.md principle 5's pluggable-primitives form. |
+| 2026-04-12 | Synchronous handler contract | Ring-style. Never add async primitives to the contract. |
+| 2026-04-12 | Reader conditional concentration | Platform-specific code in `defport.util.platform`. |
+| 2026-04-12 | Unified use is emergent | Three independent adapters, one registry, composition in consumer code. |
+| 2026-04-12 | Capability layer in consumer | Domain-specific shape translation lives in defnet, not defport. |
+| 2026-04-12 | DAP client + proxy in defnet | Consumer-side spawning and source-to-graph attribution lives in defnet. |
+| 2026-04-15 | MCP stdio = JSON-lines | Campaign 5o caught defport using Content-Length for MCP stdio by spawning `@modelcontextprotocol/server-everything`. MCP 2025-11-25 specifies newline-delimited JSON; LSP/DAP still use Content-Length. `sugar/run!` auto-selects per protocol. |
+| 2026-04-15 | Spec registries are plain data | No schema lib (malli, spec). Predicate fns in validate slots for consumers to plug their own. Keeps defport neutral about which schema library a consumer prefers. |
+| 2026-04-15 | BSP adopted | Direct substrate fit (JSON-RPC over stdio, same as LSP/DAP), small surface, upstream Smithy spec is the source of truth. |
+| 2026-04-15 | CDP adopted | WebSocket + JSON-RPC + domain routing = defport's shape. Spec registry generated at load time from upstream JSON — zero drift, zero maintenance. |
+| 2026-04-15 | WebSocket transport shipped | `java.net.http.WebSocket` on JVM (JDK 11+, zero new deps) + native `WebSocket` on Node. Shared between CDP and rosbridge. |
+| 2026-04-15 | rosbridge client shipped as ROS 2 bridge | `defport.ros2.client` speaks rosbridge v2.0, which is defport-shaped (JSON-over-WebSocket with op routing). No DDS, no FFI, no rclcpp. Closes the Clojure ↔ ROS 2 gap for the 80% case. |
+| 2026-04-15 | Industrial / SCADA protocols out of scope as native adapters | Wrong substrate shape (binary, real-time, hardware-routed). The contribution to that space is the MCP-wraps-backend pattern documented in `examples/industrial_mcp.clj`. |
 
-See [docs/PROJECT_HISTORY.md](docs/PROJECT_HISTORY.md) for complete evolution.
-
-See [CLAUDE.md](CLAUDE.md) for the six non-negotiable design principles.
-
----
-
-*Last Updated: 2026-04-12*
+See [`docs/PROJECT_HISTORY.md`](docs/PROJECT_HISTORY.md) for the
+complete evolution, and [`CLAUDE.md`](CLAUDE.md) for the six
+non-negotiable design principles.

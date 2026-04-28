@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**defport** is a **LOW-LEVEL LIBRARY** for building protocol servers (MCP, LSP, DAP). It provides protocol adapters, NOT application frameworks.
+**defport** is a **LOW-LEVEL LIBRARY** for building protocol servers and clients across six protocols: MCP, LSP, DAP, BSP, CDP, and rosbridge. It provides protocol adapters + client cores + a pluggable transport layer, NOT application frameworks.
 
-**Status:** 304 tests, 1856 assertions, 0 failures | 100% MCP 2025-11-25 spec compliant | Core library compiles clean on JVM and Node (CLJS)
+**Status (v0.3.0):** 379 kaocha tests / 2,103 assertions / 0 failures | 100% spec coverage for every protocol (MCP 2025-11-25, LSP 3.17, DAP 1.65, BSP 2.2, CDP 1.3, rosbridge v2.0) verified programmatically against upstream schemas on every test run | 8 real-external integration tests against real Chromium, rust-analyzer, debugpy, `@modelcontextprotocol/server-everything`, and Python stdlib clients | Core library compiles clean on JVM and Node (CLJS)
 
 ## Critical: Library Philosophy
 
@@ -14,10 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | We Provide | We Do NOT Provide |
 |------------|-------------------|
-| Protocol adapters (MCP, LSP*, DAP*) | Auth middleware |
-| Transport layer (stdio, HTTP) | Metrics collectors |
-| Port registry system | HTTP middleware stacks |
-| Observability hooks (tap>, datafy/nav) | Component/Integrant adapters |
+| Protocol adapters (MCP, LSP, DAP, BSP) | Auth middleware |
+| Client cores (MCP, LSP, DAP, BSP, CDP, rosbridge) | Metrics collectors |
+| Transport layer (stdio, HTTP, WebSocket, subprocess) | HTTP middleware stacks |
+| Plain-data spec registries (drift-checked vs upstream) | Component/Integrant adapters |
+| Observability hooks (tap>, datafy/nav) | Native SCADA / DDS / CAN bindings |
+| `sugar/run!` one-line launcher | Industrial vertical integrations |
 
 **When developing:**
 
@@ -85,33 +87,52 @@ After the cross-platform cleanup, remaining `#?(:clj ... :cljs ...)` conditional
 
 ### Four Key Abstractions (defport.core)
 
-1. **Port** - Protocol-agnostic capability (same port works via MCP, LSP, DAP)
-2. **Transport** - Message delivery (stdio, HTTP, WebSocket)
-3. **ProtocolAdapter** - Protocol translation (MCP, LSP, DAP)
-4. **PortRegistry** - Port management (EDN, Function, Hybrid)
+1. **Port** - Protocol-agnostic capability (same port works via MCP, LSP, DAP, BSP)
+2. **Transport** - Message delivery (stdio, HTTP, WebSocket, subprocess)
+3. **ProtocolAdapter** - Protocol translation for server role (MCP, LSP, DAP, BSP)
+4. **ClientTransport** - Pluggable client-side transport (one protocol per namespace)
+5. **PortRegistry** - Port management (EDN, Function, Hybrid)
+6. **Spec registry** - Plain-data wire method catalog per protocol, drift-checked on every test run
 
-### Key Files
+### Key files (by protocol)
 
 | File | Purpose |
 |------|---------|
-| `src/defport/core.cljc` | Core protocols (Port, Transport, ProtocolAdapter, PortRegistry, ProtocolClient contract) |
-| `src/defport/mcp.cljc` | MCP 2025-11-25 server adapter — pure cross-platform |
-| `src/defport/dap.cljc` | DAP server adapter — pure cross-platform |
-| `src/defport/lsp.cljc` | LSP server adapter — pure cross-platform |
+| `src/defport/core.cljc` | Core protocols (Port, Transport, ProtocolAdapter, PortRegistry, ProtocolClient) |
+| `src/defport/sugar.cljc` | Unified DSL + `sugar/run!` one-line launcher + `create-adapter` multimethod |
+| `src/defport/util/platform.cljc` | Cross-platform abstraction layer (error, JSON, time, `try-any`, `unwrap`) |
 | `src/defport/registry.cljc` | Registry implementations (EDN, Function, Hybrid) |
-| `src/defport/sugar.cljc` | Shared sugar infrastructure (`deftool`, `defprompt`, lifecycle hooks) |
-| `src/defport/transports/stdio.cljc` | Stdio transport (JVM http-kit + Node callbacks in one file) |
-| `src/defport/transports/http.cljc` | HTTP transport (JVM + Node, same pattern) |
-| `src/defport/util/platform.cljc` | **The cross-platform abstraction layer** — error handling, JSON, time, `try-any` macro, `unwrap` extension point |
-| `src/defport/inspect.cljc` | REPL introspection (datafy/nav), fully cross-platform |
-| `src/defport/testing/server.cljc` | Test server helpers (cross-platform) |
-| `src/defport/testing/client.clj` | Test client harness (JVM-only, subprocess spawning) |
-| `src/mcp.cljc`, `src/dap.cljc`, `src/lsp.cljc` | Top-level sugar facades (single-segment namespaces: `mcp`, `dap`, `lsp`) |
+| `src/defport/transports/stdio.cljc` | Stdio transport — Content-Length and JSON-lines framing, both platforms |
+| `src/defport/transports/framing.cljc` | Shared Content-Length + JSON-lines codecs |
+| `src/defport/transports/http.cljc` | HTTP transport — Ring-compatible |
+| `src/defport/transports/websocket_client.cljc` | WebSocket ClientTransport — JVM + Node, shared between CDP and rosbridge |
+| **MCP** — `src/defport/mcp.cljc` | Server adapter (1,650 LOC) |
+| `src/defport/mcp/spec.cljc` | 31 methods, drift-checked vs upstream `schema.json` |
+| `src/defport/mcp/client.cljc` | Client core (11 typed helpers) |
+| `src/defport/mcp/client/transports/subprocess.cljc` | Reference subprocess transport (JSON-lines) |
+| **LSP** — `src/defport/lsp.cljc` | Server adapter (~1,900 LOC) |
+| `src/defport/lsp/spec.cljc` | 80 methods covering LSP 3.17 |
+| `src/defport/lsp/client.cljc` | Client core (18 typed helpers) |
+| `src/defport/lsp/client/transports/subprocess.cljc` | Reference subprocess transport (Content-Length) |
+| **DAP** — `src/defport/dap.cljc` | Server adapter (~1,100 LOC) |
+| `src/defport/dap/spec.cljc` | 45 commands + 17 events |
+| `src/defport/dap/client.cljc` | Client core (30 typed helpers) |
+| `src/defport/dap/client/transports/subprocess.cljc` | Reference subprocess transport |
+| **BSP** — `src/defport/bsp/spec.cljc` | 27 methods from upstream Smithy |
+| `src/defport/bsp/client.cljc` | Client core (13 typed helpers) |
+| `src/defport/bsp/client/transports/subprocess.cljc` | Reference subprocess transport |
+| **CDP** — `src/defport/cdp/spec.cljc` | 664 commands + 237 events auto-derived from upstream JSON at load time |
+| `src/defport/cdp/client.cljc` | Client core (20 typed helpers + generic `request!`) |
+| `src/defport/cdp/client/transports/websocket.cljc` | WebSocket transport wrapper |
+| **rosbridge v2.0** — `src/defport/ros2/spec.cljc` | 20 ops |
+| `src/defport/ros2/client.cljc` | Client core (12 typed helpers) |
+| `src/defport/ros2/client/transports/websocket.cljc` | WebSocket transport wrapper |
+| `src/defport/inspect.cljc` | REPL introspection (datafy/nav) |
 
 ## Common Commands
 
 ```bash
-# Run all tests (304 tests / 1856 assertions)
+# Run all tests (379 tests / 2,103 assertions at v0.3.0)
 clojure -M:kaocha
 
 # Run a specific test namespace

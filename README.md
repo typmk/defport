@@ -9,15 +9,17 @@ JVM or Node.
 
 ## Status
 
-**Tests:** 374 kaocha / 2,086 assertions / 0 failures. 194 CLJS /
-584 assertions / 0 failures. 3 real-external integration tests
-(MCP passes against
-[`@modelcontextprotocol/server-everything`](https://www.npmjs.com/package/@modelcontextprotocol/server-everything);
-LSP + DAP skip cleanly when their external peer isn't installed).
+**Tests:** 379 kaocha / 2,103 assertions / 0 failures. 194 CLJS
+smoke / 584 assertions / 0 failures. 8 real-external integration
+tests — MCP ↔ `@modelcontextprotocol/server-everything`, LSP ↔
+rust-analyzer 1.94.1, DAP ↔ debugpy 1.8.20, **CDP ↔ real headless
+Chromium 142**, ROS 2 ↔ fake rosbridge; MCP/LSP/DAP server roles
+validated by a Python stdlib external client.
 
 **Spec coverage** — verified programmatically on every test run
 against `vscode-languageserver-protocol`, `@vscode/debugprotocol`,
-and the upstream MCP `schema.json`:
+the upstream MCP `schema.json`, the BSP Smithy spec, and
+Chromium's `browser_protocol.json` + `js_protocol.json`:
 
 | Protocol                | Official | defport | Coverage |
 |-------------------------|---------:|--------:|---------:|
@@ -25,6 +27,10 @@ and the upstream MCP `schema.json`:
 | DAP 1.65 commands       |    45    |   45    |  100.0%  |
 | DAP 1.65 events         |    17    |   17    |  100.0%  |
 | MCP 2025-11-25 methods  |    31    |   31    |  100.0%  |
+| BSP 2.2 methods         |    27    |   27    |  100.0%  |
+| CDP 1.3 commands        |   664    |  664    |  100.0%  (data-driven from upstream JSON) |
+| CDP 1.3 events          |   237    |  237    |  100.0%  |
+| rosbridge v2.0 ops      |    20    |   20    |  100.0%  |
 
 **Cross-platform:** JVM + Node (CLJS). Every `.cljc` namespace
 compiles clean on both.
@@ -145,6 +151,89 @@ filters `defport.sugar/*registry*` for its own metadata
 (`:mcp/tool`, `:lsp/method`, `:dap/command`). The protocols never
 see each other's ports but share the same underlying logic. See
 `examples/multi_adapter.clj`.
+
+## Quick start — BSP (Build Server Protocol)
+
+Same shape as LSP/DAP. Spawn a BSP server (sbt, Mill, Bloop,
+Bazel) and query its build graph:
+
+```clojure
+(require '[defport.bsp.client :as bsp]
+         '[defport.bsp.client.transports.subprocess :as sub])
+
+(def build
+  (-> (sub/transport ["bloop" "bsp"])
+      (bsp/create-client)
+      (bsp/connect! {:root-uri "file:///path/to/project"
+                     :capabilities {:languageIds ["clojure"]}})))
+
+(bsp/await (bsp/workspace-build-targets build))
+(bsp/await (bsp/build-target-compile build [{:uri "bloop://my-target"}]))
+```
+
+Full surface: 27 methods covering lifecycle, workspace discovery,
+build target operations (sources/dependencies/compile/test/run),
+debug sessions, and task/diagnostic notifications.
+
+## Quick start — CDP (Chrome DevTools Protocol)
+
+Drive a real Chromium browser over WebSocket:
+
+```clojure
+(require '[defport.cdp.client :as cdp]
+         '[defport.cdp.client.transports.websocket :as ws]
+         '[cheshire.core :as json])
+
+;; Start chromium with: chromium --headless=new --remote-debugging-port=9222
+(def page (first (filter #(= "page" (:type %))
+                         (json/parse-string
+                           (slurp "http://localhost:9222/json") true))))
+
+(def browser
+  (-> (ws/transport (:webSocketDebuggerUrl page))
+      (cdp/create-client)
+      (cdp/connect! {})))
+
+(cdp/await (cdp/browser-get-version browser))
+(cdp/await (cdp/page-navigate browser "https://example.com"))
+(cdp/await (cdp/runtime-evaluate browser "document.title"))
+(cdp/await (cdp/page-capture-screenshot browser))
+```
+
+The full CDP surface (664 commands + 237 events across 56 domains)
+is reachable via `(cdp/request! client :Domain/command params)`.
+20 common commands have typed helpers.
+
+## Quick start — ROS 2 via rosbridge
+
+Talk to a ROS 2 robot from Clojure without rclcpp/rclpy/DDS:
+
+```clojure
+(require '[defport.ros2.client :as ros2]
+         '[defport.ros2.client.transports.websocket :as ws])
+
+;; Robot runs: ros2 launch rosbridge_server rosbridge_websocket_launch.xml
+(def robot
+  (-> (ws/transport "ws://robot.local:9090")
+      (ros2/create-client)
+      (ros2/connect! {})))
+
+;; Subscribe to a laser scan topic
+(ros2/on-topic robot "/scan" (fn [msg] (println :ranges (:ranges msg))))
+(ros2/subscribe! robot "/scan" "sensor_msgs/msg/LaserScan")
+
+;; Call a service
+@(ros2/await (ros2/call-service robot "/add_two_ints" {:a 1 :b 2}))
+
+;; Send a nav goal
+(ros2/send-action-goal robot "/navigate_to_pose"
+  {:pose {:header {:frame_id "map"}
+          :pose {:position {:x 5 :y 3 :z 0}
+                 :orientation {:x 0 :y 0 :z 0 :w 1}}}})
+```
+
+20 ops covering lifecycle, topics, services, and actions. Uses
+the same JSON-over-WebSocket transport as CDP.
 
 ## Quick Start — Node (CLJS)
 
