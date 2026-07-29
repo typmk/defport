@@ -227,11 +227,29 @@
 ;; CDP: defport client vs real Chromium
 ;; ============================================================================
 
+(def ^:private chromium-candidates
+  ;; Distributions and CI images disagree on the name. GitHub's ubuntu runners
+  ;; ship google-chrome and no `chromium` at all, so hardcoding one name made
+  ;; this test pass on the author's machine and fail everywhere else.
+  ["chromium" "chromium-browser" "google-chrome" "google-chrome-stable"])
+
+(defn- chromium-binary
+  "First candidate browser on PATH, or nil."
+  []
+  (some (fn [c]
+          (when (try (zero? (.waitFor (.start (ProcessBuilder. ["which" c]))))
+                     (catch Exception _ false))
+            c))
+        chromium-candidates))
+
 (defn- start-headless-chromium!
-  "Spawn chromium with a remote debugging port. Returns the Process
-   handle so the test can terminate it in a finally."
+  "Spawn a Chromium-family browser with a remote debugging port. Returns the
+   Process handle so the test can terminate it in a finally."
   [port]
-  (let [pb (ProcessBuilder. ["chromium"
+  (let [bin (or (chromium-binary)
+                (throw (ex-info "No Chromium-family browser on PATH"
+                                {:looked-for chromium-candidates})))
+        pb (ProcessBuilder. [bin
                              "--headless=new"
                              "--disable-gpu"
                              "--no-sandbox"
@@ -241,7 +259,8 @@
     ;; Wait until the DevTools endpoint accepts connections.
     (loop [tries 30]
       (if (zero? tries)
-        (throw (ex-info "Chromium DevTools endpoint didn't come up in time" {}))
+        (throw (ex-info "Chromium DevTools endpoint didn't come up in time"
+                        {:binary bin :port port}))
         (let [ok? (try (slurp (str "http://localhost:" port "/json/version")) true
                        (catch Exception _ false))]
           (if ok?
