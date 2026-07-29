@@ -228,51 +228,56 @@
 ;; ============================================================================
 
 (def ^:private chromium-candidates
-  ;; Distributions and CI images disagree on the name. GitHub's ubuntu runners
-  ;; ship google-chrome and no `chromium` at all, so hardcoding one name made
-  ;; this test pass on the author's machine and fail everywhere else.
-  ["chromium" "chromium-browser" "google-chrome" "google-chrome-stable"])
+  ;; Distributions and CI images disagree on the name, so this test hardcoded
+  ;; `chromium` and passed only where that name happened to exist.
+  ;;
+  ;; Resolving the name is NOT enough. GitHub's ubuntu runners DO put a
+  ;; `chromium` on PATH, and it does not start — `which` succeeds and the
+  ;; DevTools port never opens. So each candidate is launched and checked,
+  ;; and the first that actually answers wins.
+  ["google-chrome" "google-chrome-stable" "chromium" "chromium-browser"
+   ;; Chromium forks speak CDP too, and on a machine that has one of these and
+   ;; no plain `chromium` the test would otherwise skip forever.
+   "helium" "brave-browser" "vivaldi" "thorium-browser"])
 
-(defn- chromium-binary
-  "First candidate browser on PATH, or nil."
-  []
-  (some (fn [c]
-          (when (try (zero? (.waitFor (.start (ProcessBuilder. ["which" c]))))
-                     (catch Exception _ false))
-            c))
-        chromium-candidates))
+(defn- devtools-up?
+  [port]
+  (try (slurp (str "http://localhost:" port "/json/version")) true
+       (catch Exception _ false)))
+
+(defn- try-launch!
+  "Launch BIN headless and wait for the DevTools port. Returns the Process on
+   success, nil if it never came up (destroying whatever it started)."
+  [bin port]
+  (let [proc (try (.start (ProcessBuilder. [bin
+                                            "--headless=new"
+                                            "--disable-gpu"
+                                            "--no-sandbox"
+                                            (str "--remote-debugging-port=" port)
+                                            "about:blank"]))
+                  (catch Exception _ nil))]
+    (when proc
+      (loop [tries 25]
+        (cond
+          (devtools-up? port) proc
+          (zero? tries)       (do (.destroyForcibly proc) nil)
+          :else               (do (Thread/sleep 200) (recur (dec tries))))))))
 
 (defn- start-headless-chromium!
   "Spawn a Chromium-family browser with a remote debugging port. Returns the
-   Process handle so the test can terminate it in a finally."
+   Process handle, or nil if no candidate could be started."
   [port]
-  (let [bin (or (chromium-binary)
-                (throw (ex-info "No Chromium-family browser on PATH"
-                                {:looked-for chromium-candidates})))
-        pb (ProcessBuilder. [bin
-                             "--headless=new"
-                             "--disable-gpu"
-                             "--no-sandbox"
-                             (str "--remote-debugging-port=" port)
-                             "about:blank"])
-        proc (.start pb)]
-    ;; Wait until the DevTools endpoint accepts connections.
-    (loop [tries 30]
-      (if (zero? tries)
-        (throw (ex-info "Chromium DevTools endpoint didn't come up in time"
-                        {:binary bin :port port}))
-        (let [ok? (try (slurp (str "http://localhost:" port "/json/version")) true
-                       (catch Exception _ false))]
-          (if ok?
-            proc
-            (do (Thread/sleep 200) (recur (dec tries)))))))))
+  (some #(try-launch! % port) chromium-candidates))
 
 (deftest test-cdp-real-chromium
   (testing "defport CDP client can drive real Chromium"
-    (if-not (available? "chromium")
-      (skip "chromium not installed")
-      (let [port 9222
-            proc (start-headless-chromium! port)]
+    ;; Guarded on a browser that actually STARTS, not on the name `chromium`
+    ;; being resolvable. The old guard was wrong in both directions: it skipped
+    ;; on any machine whose browser is called something else (so this never ran
+    ;; locally), and it passed on CI runners that carry a `chromium` which does
+    ;; not launch (so this errored there).
+    (if-let [proc (start-headless-chromium! 9222)]
+      (let [port 9222]
         (try
           (let [targets (json/parse-string
                           (slurp (str "http://localhost:" port "/json")) true)
@@ -306,7 +311,9 @@
                 (cdp/disconnect! client))))
           (finally
             (.destroy proc)
-            (try (.waitFor proc) (catch Exception _))))))))
+            (try (.waitFor proc) (catch Exception _)))))
+      (skip (str "no Chromium-family browser could be started; tried "
+                 (clojure.string/join ", " chromium-candidates))))))
 
 ;; ============================================================================
 ;; rosbridge: defport.ros2.client vs a minimal fake rosbridge_server
