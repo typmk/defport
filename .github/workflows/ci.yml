@@ -15,10 +15,15 @@ jobs:
       - name: Install Clojure + Java
         uses: DeLaGuardo/setup-clojure@13.4
         with:
-          cli: 1.11.3
-          # Without a token the action downloads unauthenticated and is rate
-          # limited on shared runners — it failed here with a bare
-          # "Unexpected HTTP response: 403" before any test ran.
+          # A Clojure CLI version, NOT the language version. These are four
+          # parts (1.12.5.1664); deps.edn pins the LANGUAGE at 1.11.3, and
+          # that is what was written here. download.clojure.org answers 403
+          # for linux-install-1.11.3.sh because no such CLI release exists,
+          # which the action surfaces as a bare "Unexpected HTTP response:
+          # 403" — indistinguishable from a rate limit, and it is not one.
+          cli: 1.12.5.1664
+          # Harmless and worth keeping: the action queries GitHub for tools
+          # like bb and clj-kondo, and is rate limited unauthenticated.
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Node (for shadow-cljs + MCP server fixtures)
