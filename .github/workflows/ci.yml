@@ -16,6 +16,10 @@ jobs:
         uses: DeLaGuardo/setup-clojure@13.4
         with:
           cli: 1.11.3
+          # Without a token the action downloads unauthenticated and is rate
+          # limited on shared runners — it failed here with a bare
+          # "Unexpected HTTP response: 403" before any test ran.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Node (for shadow-cljs + MCP server fixtures)
         uses: actions/setup-node@v4
