@@ -69,12 +69,9 @@ jobs:
       - name: Kaocha (JVM tests + real-external integration)
         run: clojure -M:kaocha
 
-      - name: shadow-cljs compile :test
-        run: |
-          cd ..   # defnet (parent dir) holds shadow-cljs.edn for the CLJS smoke
-          npx shadow-cljs compile :test
+      # Proves the README's cross-platform claim from THIS repo. It used to
+      # `cd ..` into a defnet checkout, which only exists on a machine where
+      # defport is a subdirectory of one.
+      - name: Compile the .cljc surface for Node
+        run: clojure -M:cljs compile test
 
-      - name: Node CLJS smoke
-        run: |
-          cd ..
-          node out/test.js

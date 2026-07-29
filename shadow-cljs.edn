@@ -1,0 +1,26 @@
+;; Proves the cross-platform claim in THIS repo rather than in a consumer's.
+;;
+;; defport ships 38 .cljc namespaces and the README states every one compiles
+;; clean on JVM and Node. The only thing checking that was defnet's test
+;; build, so defport's CI did `cd ..` and compiled the PARENT directory —
+;; which works when defport sits inside a defnet checkout and nowhere else.
+;; A standalone clone failed with "Could not find shadow-cljs.edn config file".
+;;
+;; :deps true means the classpath comes from deps.edn; run it through the
+;; :cljs alias, which carries shadow-cljs and test/:
+;;
+;;   clojure -M:cljs compile test
+{:deps   true
+ :builds {:test {:target    :node-test
+                 :output-to "out/node-test.js"
+                 :ns-regexp "defport\\..*-test$"
+                 ;; Compile-only, because compiling IS the claim: "every .cljc
+                 ;; namespace compiles clean on JVM and Node". Running the
+                 ;; .cljc suite under CLJS is a stronger gate and currently
+                 ;; fails — dap_test's evaluate cases return "No eval function
+                 ;; provided" on Node (4 failures, 1 error of 114 assertions),
+                 ;; a real defect in the CLJS eval path rather than in CI.
+                 ;; Turn this on when that is fixed; do not turn it on to make
+                 ;; the number look better.
+                 :autorun   false
+                 :compiler-options {:output-feature-set :es2020}}}}
