@@ -524,7 +524,6 @@ defport now integrates with YOUR infrastructure instead of providing its own.
 **See Also:**
 - [docs/INTEGRATION.md](docs/INTEGRATION.md) - Integration patterns
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - Design rationale
-- [SESSION_STATE.md](SESSION_STATE.md) - Complete session history
 
 ---
 

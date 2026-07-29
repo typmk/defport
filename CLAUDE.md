@@ -264,7 +264,6 @@ Use reader conditionals: `#?(:clj ... :cljs ...)`
 |----------|---------|
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | Integration patterns (Component, Ring, auth, metrics) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design rationale |
-| [docs/PROJECT_HISTORY.md](docs/PROJECT_HISTORY.md) | Evolution and decisions |
 | [ROADMAP.md](ROADMAP.md) | Feature roadmap |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
 

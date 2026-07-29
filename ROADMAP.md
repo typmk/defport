@@ -274,6 +274,5 @@ still out-of-scope:
 | 2026-04-15 | rosbridge client shipped as ROS 2 bridge | `defport.ros2.client` speaks rosbridge v2.0, which is defport-shaped (JSON-over-WebSocket with op routing). No DDS, no FFI, no rclcpp. Closes the Clojure ↔ ROS 2 gap for the 80% case. |
 | 2026-04-15 | Industrial / SCADA protocols out of scope as native adapters | Wrong substrate shape (binary, real-time, hardware-routed). The contribution to that space is the MCP-wraps-backend pattern documented in `examples/industrial_mcp.clj`. |
 
-See [`docs/PROJECT_HISTORY.md`](docs/PROJECT_HISTORY.md) for the
-complete evolution, and [`CLAUDE.md`](CLAUDE.md) for the six
-non-negotiable design principles.
+See [`CLAUDE.md`](CLAUDE.md) for the six non-negotiable design
+principles, and [`CHANGELOG.md`](CHANGELOG.md) for version history.
