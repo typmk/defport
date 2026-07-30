@@ -14,13 +14,23 @@
  :builds {:test {:target    :node-test
                  :output-to "out/node-test.js"
                  :ns-regexp "defport\\..*-test$"
-                 ;; Compile-only, because compiling IS the claim: "every .cljc
-                 ;; namespace compiles clean on JVM and Node". Running the
-                 ;; .cljc suite under CLJS is a stronger gate and currently
-                 ;; fails — dap_test's evaluate cases return "No eval function
-                 ;; provided" on Node (4 failures, 1 error of 114 assertions),
-                 ;; a real defect in the CLJS eval path rather than in CI.
-                 ;; Turn this on when that is fixed; do not turn it on to make
-                 ;; the number look better.
-                 :autorun   false
+                 ;; Runs the suite, not just the compile. It was compile-only
+                 ;; while the .cljc suite failed under CLJS — dap_test's
+                 ;; evaluate cases returned "No eval function provided" on
+                 ;; Node, 4 failures and 1 error of 114 assertions. The cause
+                 ;; was dap/evaluate's :cljs fallback returning an error MAP as
+                 ;; a value, so it flowed into the success path and a client
+                 ;; saw a successful evaluation of Map[1]. Fixed: there is no
+                 ;; default eval under CLJS (Node has no runtime eval of
+                 ;; Clojure forms without self-hosted ClojureScript, which is
+                 ;; not a dependency this library takes), and that condition
+                 ;; now returns a DAP error. 13 tests / 118 assertions green.
+                 ;;
+                 ;; This makes the suite RUN on `compile`. It does NOT make a
+                 ;; failure fail the command: `shadow-cljs compile` exits 0
+                 ;; regardless of what autorun reported — measured, with a
+                 ;; deliberately broken assertion giving "1 failures" and exit
+                 ;; 0. CI therefore runs `node out/node-test.js` as its own
+                 ;; step, which exits 1. Do not treat this flag as the gate.
+                 :autorun   true
                  :compiler-options {:output-feature-set :es2020}}}}

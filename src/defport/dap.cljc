@@ -593,6 +593,30 @@
 
 ;; --- Evaluation (The core REPL functionality!) ---
 
+(def default-eval-fn
+  "The eval used when no :evaluate port and no :eval-fn are supplied.
+
+   JVM only, and deliberately nil under ClojureScript. There is no runtime eval
+   of Clojure forms on Node without self-hosted ClojureScript, and pulling
+   cljs.js in would be a hard dependency the library does not take — callers
+   bring their own eval, exactly as they bring their own async.
+
+   Previously the :cljs branch was (fn [code] {:error \"No eval function
+   provided\"}), whose return value flowed on into the success path: the error
+   map got pr-str'd into :result, typed as Map[1], and handed a variables
+   reference. A client saw a successful evaluation of a map. Being nil here
+   routes the same condition to no-eval-fn-response instead."
+  #?(:clj (fn [code] (eval (read-string code)))
+     :cljs nil))
+
+(def ^:private no-eval-fn-response
+  "DAP evaluate error shape — the same one the :evaluate port's :error branch
+   and the catch-any branch produce, so a client has one thing to check."
+  {:result (str "Error: no eval function provided. ClojureScript has no runtime"
+                " eval; pass :backend-opts {:eval-fn (fn [code] ...)} or"
+                " register an :evaluate port.")
+   :variablesReference 0})
+
 (defmethod handle-request "evaluate"
   [_ args context]
   (let [{:keys [adapter-state port-registry backend-opts]} context
@@ -615,13 +639,12 @@
              :variablesReference (create-var-ref-for-value adapter-state (:result result))}))
 
         ;; Fallback to direct eval if no port (dangerous in production!)
-        (let [eval-fn (or (:eval-fn backend-opts)
-                          #?(:clj (fn [code] (eval (read-string code)))
-                             :cljs (fn [code] {:error "No eval function provided"})))
-              result (eval-fn expression)]
-          {:result (truncate-str (pr-str result) 10000)
-           :type (type-name result)
-           :variablesReference (create-var-ref-for-value adapter-state result)}))
+        (if-let [eval-fn (or (:eval-fn backend-opts) default-eval-fn)]
+          (let [result (eval-fn expression)]
+            {:result (truncate-str (pr-str result) 10000)
+             :type (type-name result)
+             :variablesReference (create-var-ref-for-value adapter-state result)})
+          no-eval-fn-response))
 
       (catch-any e
         {:result (str "Error: " (platform/error-message e))

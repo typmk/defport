@@ -91,3 +91,11 @@ jobs:
       - name: Compile the .cljc surface for Node
         run: clojure -M:cljs compile test
 
+      # Separate step, and load-bearing: `shadow-cljs compile` exits 0 even
+      # when :autorun has just run the suite and reported failures. Measured —
+      # a deliberately broken assertion gave "1 failures" and exit 0. So
+      # turning :autorun on makes the suite RUN but does not make CI fail;
+      # only running the built bundle does, which exits 1 on any failure.
+      - name: Run the .cljc suite on Node
+        run: node out/node-test.js
+

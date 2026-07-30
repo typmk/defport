@@ -1,6 +1,7 @@
 (ns defport.protocols.dap-test
   "Tests for DAP protocol adapter."
   (:require [clojure.test :refer [deftest testing is are]]
+            [clojure.string :as str]
             [defport.dap :as dap]
             [defport.core :as core]
             [defport.registry :as registry]))
@@ -260,21 +261,48 @@
 ;; ============================================================================
 
 (deftest evaluate-test
-  (testing "evaluate with default eval"
-    (let [adapter (dap/create-dap-adapter)
-          result (dispatch-command adapter "evaluate"
-                   {:expression "(+ 1 2)"
-                    :context "repl"})]
-      (is (= "3" (:result result)))
-      (is (= 0 (:variablesReference result)))
-      (is (= "Integer" (:type result)))))
+  ;; A default eval is a JVM affordance, not a cross-platform one: Node has no
+  ;; runtime eval of Clojure forms without self-hosted ClojureScript. So the
+  ;; two platforms are asserted separately rather than the CLJS case being
+  ;; left to fail.
+  #?(:clj
+     (testing "evaluate with the JVM default eval"
+       (let [adapter (dap/create-dap-adapter)
+             result (dispatch-command adapter "evaluate"
+                      {:expression "(+ 1 2)"
+                       :context "repl"})]
+         (is (= "3" (:result result)))
+         (is (= 0 (:variablesReference result)))
+         (is (= "Integer" (:type result)))))
+
+     :cljs
+     (testing "with no eval-fn, CLJS reports a DAP error rather than a result"
+       (let [adapter (dap/create-dap-adapter)
+             result (dispatch-command adapter "evaluate"
+                      {:expression "(+ 1 2)"
+                       :context "repl"})]
+         (is (nil? dap/default-eval-fn) "no default eval exists under CLJS")
+         (is (str/includes? (:result result) "Error"))
+         (is (str/includes? (:result result) "eval function"))
+         ;; The regression this guards: the old :cljs branch returned an error
+         ;; MAP as a value, which was then typed and given a var-ref, so a
+         ;; client saw a successful evaluation of Map[1].
+         (is (= 0 (:variablesReference result))
+             "a failed evaluation must not be handed a variables reference")
+         (is (not= "Map[1]" (:type result))))))
 
   (testing "evaluate returns complex structures"
-    (let [adapter (dap/create-dap-adapter)
+    ;; Supplies its own eval-fn. Without one this asserted only that CLJS
+    ;; returned SOME string with SOME var-ref, which the old error map
+    ;; satisfied — it passed on Node while evaluating nothing at all.
+    (let [adapter (dap/create-dap-adapter
+                   {:backend :repl
+                    :backend-opts {:eval-fn (fn [_] {:a 1 :b 2})}})
           result (dispatch-command adapter "evaluate"
                    {:expression "{:a 1 :b 2}"
                     :context "repl"})]
       (is (string? (:result result)))
+      (is (str/includes? (:result result) ":a"))
       (is (> (:variablesReference result) 0)
           "Complex result should have variable reference")))
 
@@ -299,13 +327,21 @@
                      {:port-registry my-registry})]
         (is (= "\"Evaluated: test-code\"" (:result result))))))
 
-  (testing "evaluate handles errors gracefully"
-    (let [adapter (dap/create-dap-adapter)
+  (testing "evaluate handles a throwing eval-fn gracefully"
+    ;; Was (throw (Exception. "test error")) evaluated by the default eval and
+    ;; checked with .contains — two JVM-only constructs in a .cljc test:
+    ;; there is no Exception in CLJS, and .contains is not a JS String method.
+    ;; A supplied eval-fn that throws exercises the same catch-any path on both.
+    (let [adapter (dap/create-dap-adapter
+                   {:backend :repl
+                    :backend-opts {:eval-fn (fn [_]
+                                              (throw (ex-info "test error" {})))}})
           result (dispatch-command adapter "evaluate"
-                   {:expression "(throw (Exception. \"test error\"))"
+                   {:expression "anything"
                     :context "repl"})]
       (is (string? (:result result)))
-      (is (.contains (:result result) "Error")))))
+      (is (str/includes? (:result result) "Error"))
+      (is (= 0 (:variablesReference result))))))
 
 ;; ============================================================================
 ;; Completions Tests
@@ -414,7 +450,9 @@
     (let [adapter (dap/create-dap-adapter)
           ctx {:adapter-state (:adapter-state adapter)
                :backend-type :repl
-               :backend-opts {}
+               ;; An explicit eval-fn, so the lifecycle is what this test
+               ;; measures rather than which platform happens to ship an eval.
+               :backend-opts {:eval-fn (fn [_] 42)}
                :transport nil}]
       ;; Initialize
       (let [result (dap/handle-request "initialize"
