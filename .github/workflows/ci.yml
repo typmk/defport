@@ -37,12 +37,29 @@ jobs:
           # like bb and clj-kondo, and is rate limited unauthenticated.
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # No `cache:` here on purpose — the ~/.npm cache is hand-rolled below.
-      # setup-node v5+ can enable npm caching on its own, but only when
-      # package.json declares packageManager or devEngines.packageManager;
-      # this repo ships a package-lock.json and no package.json, so the bump
-      # cannot switch caching on behind our back.
-      - name: Install Node (for shadow-cljs + MCP server fixtures)
+      # bun runs the CLJS suite. setup-bun v2 is on node24, so this does not
+      # walk back the deprecation fix above.
+      - name: Install bun (runs the .cljc suite on a JS runtime)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Node stays, and not as a leftover. Two things here genuinely want it:
+      #
+      #   - real_external_test spawns `npx -y @modelcontextprotocol/*`. That is
+      #     the pattern defport DOCUMENTS for consumers in
+      #     mcp/client/transports/subprocess.cljc, so the test should keep
+      #     exercising npx rather than being rewritten to bunx to suit our
+      #     toolchain. It skips cleanly when npx is absent, and a skipped
+      #     integration test is the thing this repo was just criticised for.
+      #   - shadow-cljs's :autorun spawns node itself.
+      #
+      # No `cache:` — the ~/.npm cache is hand-rolled below. setup-node v5+ can
+      # enable npm caching on its own, but only when package.json declares
+      # packageManager or devEngines.packageManager; this repo ships a
+      # package-lock.json and no package.json, so the bump cannot switch caching
+      # on behind our back.
+      - name: Install Node (for the npx-based MCP fixtures)
         uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -96,6 +113,14 @@ jobs:
       # a deliberately broken assertion gave "1 failures" and exit 0. So
       # turning :autorun on makes the suite RUN but does not make CI fail;
       # only running the built bundle does, which exits 1 on any failure.
-      - name: Run the .cljc suite on Node
+      #
+      # Run under bun, and again under node. The point of this suite is the
+      # README's cross-platform claim, and "works on a JS runtime" is a weaker
+      # statement than "works on the two JS runtimes anyone here uses" — both
+      # were measured at 13 tests / 118 assertions green.
+      - name: Run the .cljc suite on bun
+        run: bun out/node-test.js
+
+      - name: Run the .cljc suite on node
         run: node out/node-test.js
 
