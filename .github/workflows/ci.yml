@@ -10,10 +10,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Action majors are the newest available, not the oldest that clears the
+      # "Node.js 20 is deprecated … forced to run on Node.js 24" annotation.
+      # Verified against each action.yml: checkout, setup-node and cache all
+      # move to node24 at v5, so v5 would have been enough; the newest majors
+      # cost nothing more and mean this is not revisited.
+      #
+      # cache and setup-clojure are bumped too. The deprecation annotation
+      # named only checkout / setup-node / setup-java, but cache@v4 and
+      # setup-clojure@13.4 both declare node20 as well and would have been
+      # left behind by a bump that trusted the annotation's list.
+      - uses: actions/checkout@v7
 
       - name: Install Clojure + Java
-        uses: DeLaGuardo/setup-clojure@13.4
+        # 13.6.1 is the first setup-clojure release on node24.
+        uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           # A Clojure CLI version, NOT the language version. These are four
           # parts (1.12.5.1664); deps.edn pins the LANGUAGE at 1.11.3, and
@@ -26,13 +37,18 @@ jobs:
           # like bb and clj-kondo, and is rate limited unauthenticated.
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # No `cache:` here on purpose — the ~/.npm cache is hand-rolled below.
+      # setup-node v5+ can enable npm caching on its own, but only when
+      # package.json declares packageManager or devEngines.packageManager;
+      # this repo ships a package-lock.json and no package.json, so the bump
+      # cannot switch caching on behind our back.
       - name: Install Node (for shadow-cljs + MCP server fixtures)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
       - name: Cache Clojure deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.m2
@@ -41,7 +57,7 @@ jobs:
           key: ${{ runner.os }}-clj-${{ hashFiles('**/deps.edn') }}
 
       - name: Cache npm cache (for npx -y @modelcontextprotocol/*)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-npm-mcp
