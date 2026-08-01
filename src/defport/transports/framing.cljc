@@ -43,7 +43,7 @@
         json-bytes #?(:clj  (.getBytes ^String json StandardCharsets/UTF_8)
                       :cljs (.from js/Buffer json "utf8"))
         content-length #?(:clj  (alength json-bytes)
-                          :cljs (.-length json-bytes))
+                          :cljs (.-length ^js json-bytes))
         header (str "Content-Length: " content-length "\r\n\r\n")
         header-bytes #?(:clj  (.getBytes ^String header StandardCharsets/US_ASCII)
                         :cljs (.from js/Buffer header "ascii"))]
@@ -83,7 +83,7 @@
 
 (defn- buffer-length [buffer]
   #?(:clj (alength ^bytes buffer)
-     :cljs (.-length buffer)))
+     :cljs (.-length ^js buffer)))
 
 (defn- buffer-concat [a b]
   #?(:clj
@@ -103,7 +103,7 @@
        (System/arraycopy buffer start out 0 len)
        out)
      :cljs
-     (.slice buffer start end)))
+     (.slice ^js buffer start end)))
 
 (defn- buffer-string
   "Decode a slice of the buffer as a String."
@@ -112,7 +112,7 @@
      (String. ^bytes buffer (int start) (int (- end start))
               ^String charset)
      :cljs
-     (.toString (.slice buffer start end)
+     (.toString (.slice ^js buffer start end)
                 (case charset
                   "UTF-8"   "utf8"
                   "US-ASCII" "ascii"
@@ -136,13 +136,13 @@
              (recur (inc i))))))
      :cljs
      (loop [i 0]
-       (let [len (.-length buffer)]
+       (let [len (.-length ^js buffer)]
          (if (> (+ i 4) len)
            -1
-           (if (and (= (.readUInt8 buffer i)       13)
-                    (= (.readUInt8 buffer (+ i 1)) 10)
-                    (= (.readUInt8 buffer (+ i 2)) 13)
-                    (= (.readUInt8 buffer (+ i 3)) 10))
+           (if (and (= (.readUInt8 ^js buffer i)       13)
+                    (= (.readUInt8 ^js buffer (+ i 1)) 10)
+                    (= (.readUInt8 ^js buffer (+ i 2)) 13)
+                    (= (.readUInt8 ^js buffer (+ i 3)) 10))
              (+ i 4)
              (recur (inc i))))))))
 
@@ -241,11 +241,11 @@
            (= (aget b i) (byte 10)) (inc i)
            :else (recur (inc i)))))
      :cljs
-     (let [len (.-length buffer)]
+     (let [len (.-length ^js buffer)]
        (loop [i 0]
          (cond
            (>= i len) -1
-           (= (.readUInt8 buffer i) 10) (inc i)
+           (= (.readUInt8 ^js buffer i) 10) (inc i)
            :else (recur (inc i)))))))
 
 (defn feed-lines
