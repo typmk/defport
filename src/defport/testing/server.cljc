@@ -9,7 +9,7 @@
             [defport.util.platform :as platform :include-macros true]
             [defport.transports.http :as http-transport]
             [defport.transports.stdio :as stdio-transport]
-            #?(:clj [clj-http.client :as http-client])))
+            #?(:clj [org.httpkit.client :as http-client])))
 
 ;; ============================================================================
 ;; Port Management
@@ -234,10 +234,8 @@
             (if-let [url (get-server-url server)]
               (let [continue? (try
                                ;; Try to connect to health endpoint
-                               (let [response #?(:clj (http-client/get (str url "/health")
-                                                                               {:socket-timeout 100
-                                                                                :conn-timeout 100
-                                                                                :throw-exceptions false})
+                               (let [response #?(:clj @(http-client/get (str url "/health")
+                                                                        {:timeout 100})
                                                  :cljs nil)]
                                  (if (= 200 (:status response))
                                    :ready  ; Server is ready

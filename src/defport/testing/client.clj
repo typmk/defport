@@ -4,10 +4,10 @@
   Provides a minimal MCP client for testing servers in integration tests.
   Supports both HTTP and stdio transports.
 
-  JVM-only by design: uses clj-http for HTTP and java.io.Process for stdio.
+  JVM-only by design: uses http-kit for HTTP and java.io.Process for stdio.
   A Node-based test client would live in a separate namespace."
   (:require [defport.util.platform :as platform]
-            [clj-http.client :as http-client]
+            [org.httpkit.client :as http-client]
             [clojure.java.io :as io]))
 
 ;; ============================================================================
@@ -30,8 +30,13 @@
 ;; HTTP Client
 ;; ============================================================================
 
+(defprotocol Closeable
+  "Release a test client's resources. A protocol rather than
+   java.io.Closeable so the records work on babashka too."
+  (close [this]))
+
 (defrecord HttpTestClient [base-url timeout-ms]
-  java.io.Closeable
+  Closeable
   (close [_]
     ;; HTTP clients are stateless, nothing to close
     nil))
@@ -44,13 +49,11 @@
                       :id request-id
                       :method method
                       :params (or params {})}
-        response (http-client/post
-                  (str (:base-url client) "/mcp")
-                  {:body (platform/json-encode request-body)
-                   :content-type :json
-                   :socket-timeout (:timeout-ms client)
-                   :conn-timeout (:timeout-ms client)
-                   :throw-exceptions false})
+        response @(http-client/post
+                   (str (:base-url client) "/mcp")
+                   {:body (platform/json-encode request-body)
+                    :headers {"Content-Type" "application/json"}
+                    :timeout (:timeout-ms client)})
         body (platform/json-decode (:body response))]
     (assoc body :_request-id request-id)))
 
@@ -59,7 +62,7 @@
 ;; ============================================================================
 
 (defrecord StdioTestClient [process* in* out* err* running?*]
-  java.io.Closeable
+  Closeable
   (close [_]
     (when @running?*
       (reset! running?* false)
@@ -126,7 +129,7 @@
     (client-request client \"initialize\" {...})
 
     ;; Cleanup
-    (.close client)"
+    (close client)"
   [transport-type opts]
   (case transport-type
     :http
@@ -153,7 +156,7 @@
 (defn disconnect-client
   "Disconnect and cleanup a test client."
   [client]
-  (.close client))
+  (close client))
 
 (defn client-request
   "Send a JSON-RPC request to the server and return the response.

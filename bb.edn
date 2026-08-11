@@ -1,0 +1,11 @@
+{:paths ["src" "resources"]
+ :tasks
+ {mcp-server  {:doc "Run the example MCP server on stdio under bb."
+               :extra-paths ["examples"]
+               :task (do (require 'mcp-server) ((resolve 'mcp-server/-main)))}
+  lsp-server  {:doc "Run the example LSP server on stdio under bb."
+               :extra-paths ["examples"]
+               :task (do (require 'lsp-server) ((resolve 'lsp-server/-main)))}
+  dap-server  {:doc "Run the example DAP server on stdio under bb."
+               :extra-paths ["examples"]
+               :task (do (require 'dap-server) ((resolve 'dap-server/-main)))}}}
