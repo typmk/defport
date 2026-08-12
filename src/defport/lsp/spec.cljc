@@ -362,6 +362,66 @@
     :default    (constantly [])
     :doc        "Compute completion items at a position."}
 
+   ;; The six lazy-resolve methods. They were absent from this registry AND
+   ;; invisible to scripts/spec_coverage.clj, whose method-re only admits
+   ;; namespaces containing a "/" after textDocument|workspace|window|
+   ;; notebookDocument|client|$|callHierarchy|typeHierarchy — so "100% coverage"
+   ;; could never fail on them. Servers use them to keep the first response
+   ;; cheap and fill in the expensive fields only for the item the user picks.
+   :completion-item-resolve
+   {:method     "completionItem/resolve"
+    :kind       :request
+    :direction  :client->server
+    :capability [:completionProvider :resolveProvider]
+    :sugar      :raw
+    :default    identity
+    :doc        "Fill in the expensive fields of one completion item."}
+
+   :code-lens-resolve
+   {:method     "codeLens/resolve"
+    :kind       :request
+    :direction  :client->server
+    :capability [:codeLensProvider :resolveProvider]
+    :sugar      :raw
+    :default    identity
+    :doc        "Fill in the command of one code lens."}
+
+   :code-action-resolve
+   {:method     "codeAction/resolve"
+    :kind       :request
+    :direction  :client->server
+    :capability [:codeActionProvider :resolveProvider]
+    :sugar      :raw
+    :default    identity
+    :doc        "Compute the edit of one code action, deferred from codeAction."}
+
+   :document-link-resolve
+   {:method     "documentLink/resolve"
+    :kind       :request
+    :direction  :client->server
+    :capability [:documentLinkProvider :resolveProvider]
+    :sugar      :raw
+    :default    identity
+    :doc        "Resolve the target of one document link."}
+
+   :inlay-hint-resolve
+   {:method     "inlayHint/resolve"
+    :kind       :request
+    :direction  :client->server
+    :capability [:inlayHintProvider :resolveProvider]
+    :sugar      :raw
+    :default    identity
+    :doc        "Fill in the tooltip, edits and location of one inlay hint."}
+
+   :workspace-symbol-resolve
+   {:method     "workspaceSymbol/resolve"
+    :kind       :request
+    :direction  :client->server
+    :capability [:workspaceSymbolProvider :resolveProvider]
+    :sugar      :raw
+    :default    identity
+    :doc        "Fill in the location range of one workspace symbol."}
+
    :inlay-hint
    {:method     "textDocument/inlayHint"
     :kind       :request

@@ -30,7 +30,11 @@
 ;; ============================================================================
 
 (def ^:private defnet-root
-  "/home/hbtweb/GitHub/defnet")
+  "Defport is a submodule at defnet/defport, so the reference .d.ts files are
+  one level up. This was hardcoded to /home/hbtweb/GitHub/defnet — a path on a
+  machine that no longer exists, which meant the coverage check silently found
+  no reference files anywhere else and could not fail."
+  (or (System/getenv "DEFNET_ROOT") ".."))
 
 (defn- extract-lsp-methods
   "Pull LSP method strings from vscode-languageserver-protocol .d.ts files."
@@ -47,7 +51,12 @@
         ;; ("foo/bar" or "foo/bar/baz") or a bare lifecycle name.
         matches (re-seq #"['\"]([a-zA-Z$][a-zA-Z$/]+)['\"]" text)
         candidates (->> matches (map second) set)
-        method-re #"^(textDocument|workspace|window|notebookDocument|client|\$|callHierarchy|typeHierarchy)/|^(initialize|initialized|shutdown|exit)$"]
+        ;; The resolve methods hang off an ITEM namespace, not a feature one —
+        ;; completionItem/resolve, codeLens/resolve, codeAction/resolve,
+        ;; documentLink/resolve, inlayHint/resolve, workspaceSymbol/resolve.
+        ;; Omitting those namespaces made six real LSP 3.17 methods unable to
+        ;; fail this check, and all six were in fact missing from the registry.
+        method-re #"^(textDocument|workspace|window|notebookDocument|client|\$|callHierarchy|typeHierarchy|completionItem|codeLens|codeAction|documentLink|inlayHint|workspaceSymbol)/|^(initialize|initialized|shutdown|exit)$"]
     (->> candidates
          (filter #(re-find method-re %))
          sort
