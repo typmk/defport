@@ -13,7 +13,7 @@
             [defport.dap.spec :as dap-spec]))
 
 (def ^:private defnet-root
-  "/home/hbtweb/GitHub/defnet")
+  (or (System/getenv "DEFNET_ROOT") ".."))
 
 (defn- lsp-official-methods []
   (let [dir (io/file defnet-root "node_modules"

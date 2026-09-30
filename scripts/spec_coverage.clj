@@ -31,9 +31,9 @@
 
 (def ^:private defnet-root
   "Defport is a submodule at defnet/defport, so the reference .d.ts files are
-  one level up. This was hardcoded to /home/hbtweb/GitHub/defnet — a path on a
-  machine that no longer exists, which meant the coverage check silently found
-  no reference files anywhere else and could not fail."
+  one level up. This was hardcoded to one developer's absolute path, which
+  meant the coverage check silently found no reference files anywhere else
+  and could not fail."
   (or (System/getenv "DEFNET_ROOT") ".."))
 
 (defn- extract-lsp-methods
